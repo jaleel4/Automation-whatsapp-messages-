@@ -138,7 +138,7 @@ def run_daily_automation():
                         update_payload = {
                             "properties": {
                                 "Last Sent": {"date": {"start": today_str}},
-                                "Status": {"status": {"name": "Sent"}} # Changed from "select" to "status"
+                                "Status": {"select": {"name": "Sent"}} # Changed from "select" to "status"
                             }
                         }
                         update_response = requests.patch(
@@ -162,7 +162,7 @@ def run_daily_automation():
                         try:
                             fail_payload = {
                                 "properties": {
-                                    "Status": {"status": {"name": "Failed"}} # Changed from "select" to "status"
+                                    "Status": {"select": {"name": "Failed"}} # Changed from "select" to "status"
                                 }
                             }
                             requests.patch(
