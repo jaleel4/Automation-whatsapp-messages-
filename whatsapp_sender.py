@@ -109,7 +109,10 @@ class WhatsAppSender:
             
         return False
 
-    def send_text(self, text):
+def send_text(self, text):
+        # SMART FILTER: Automatically erase this exact text whenever it appears
+        text = text.replace("How to do shadow Gym: https://youtu.be/RW4Ymk0mmno", "").strip()
+
         composer = self.get_composer()
         composer.click()
         composer.focus()
