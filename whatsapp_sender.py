@@ -114,7 +114,14 @@ class WhatsAppSender:
         composer.click()
         composer.focus()
         self.page.keyboard.insert_text(text)
-        time.sleep(1)
+        
+        # SMART DELAY: Wait 10 seconds for WhatsApp to load the video thumbnail preview
+        if "youtube.com" in text.lower() or "youtu.be" in text.lower():
+            print("🎥 YouTube link detected! Waiting 10 seconds for thumbnail to load...")
+            time.sleep(10)
+        else:
+            time.sleep(1)
+            
         self.page.keyboard.press("Enter")
         time.sleep(1)
 
