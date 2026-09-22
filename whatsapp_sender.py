@@ -5,11 +5,23 @@ class WhatsAppSender:
     def __init__(self, profile_dir):
         self.profile_dir = profile_dir
         self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch_persistent_context(
-            user_data_dir=self.profile_dir,
-            headless=False,
-            args=["--start-maximized"]
-        )
+        
+        # Use existing system browsers (Chrome or Edge) to avoid missing driver errors
+        try:
+            self.browser = self.playwright.chromium.launch_persistent_context(
+                user_data_dir=self.profile_dir,
+                headless=False,
+                channel="chrome",
+                args=["--start-maximized"]
+            )
+        except Exception:
+            self.browser = self.playwright.chromium.launch_persistent_context(
+                user_data_dir=self.profile_dir,
+                headless=False,
+                channel="msedge",
+                args=["--start-maximized"]
+            )
+
         self.page = self.browser.pages[0]
         self.page.goto("https://web.whatsapp.com/")
         print("Waiting for WhatsApp Web to load...")
@@ -125,7 +137,6 @@ class WhatsAppSender:
         
         print("Photo preview loaded.")
         
-        # Explicitly click the Send button on the photo preview
         send_btn = self.page.locator('[data-icon="send"], [aria-label="Send"]').last
         if send_btn.is_visible():
             send_btn.click(force=True)
@@ -134,7 +145,6 @@ class WhatsAppSender:
             
         time.sleep(4)
         
-        # Safety Check: If the photo preview got stuck open, forcefully close it so the script doesn't crash!
         add_file_btn = self.page.locator('[aria-label="Add file"]').first
         if add_file_btn.is_visible():
             print("⚠️ Photo preview stuck open! Attempting force send...")
