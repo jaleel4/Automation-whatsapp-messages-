@@ -134,19 +134,24 @@ def run_daily_automation():
                                 whatsapp.send_poll(block["question"], block["options"])
 
                         # 5. Update Notion Database (Direct HTTP Request)
+                        # 5. Update Notion Database (Direct HTTP Request)
                         update_payload = {
                             "properties": {
                                 "Last Sent": {"date": {"start": today_str}},
-                                "Status": {"select": {"name": "Sent"}}
+                                "Status": {"status": {"name": "Sent"}} # Changed from "select" to "status"
                             }
                         }
-                        requests.patch(
+                        update_response = requests.patch(
                             f"https://api.notion.com/v1/pages/{student['id']}", 
                             headers=notion_headers, 
                             json=update_payload
                         )
                         
-                        print(f"✅ Successfully completed daily automation for {name}.")
+                        if update_response.status_code != 200:
+                            print(f"⚠️ Message sent, but Notion update failed: {update_response.text}")
+                        else:
+                            print(f"✅ Successfully completed daily automation for {name}.")
+                        
                         logging.info(f"Success: {name} | Course Day {course_day}")
 
                     except Exception as e:
@@ -157,7 +162,7 @@ def run_daily_automation():
                         try:
                             fail_payload = {
                                 "properties": {
-                                    "Status": {"select": {"name": "Failed"}}
+                                    "Status": {"status": {"name": "Failed"}} # Changed from "select" to "status"
                                 }
                             }
                             requests.patch(
