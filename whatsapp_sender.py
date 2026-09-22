@@ -109,7 +109,7 @@ class WhatsAppSender:
             
         return False
 
-def send_text(self, text):
+    def send_text(self, text):
         # 1. Erase the "How to do" link from the main text block
         text = text.replace("How to do shadow Gym: https://youtu.be/RW4Ymk0mmno", "").strip()
         
