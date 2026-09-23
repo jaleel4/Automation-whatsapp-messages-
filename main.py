@@ -51,7 +51,7 @@ def run_daily_automation():
             continue
 
         try:
-            # 2. Pull all Active students from Notion using a Direct HTTP Request (bypasses library bugs)
+            # 2. Pull all Active students from Notion using a Direct HTTP Request
             query_payload = {
                 "filter": {
                     "property": "Active",
@@ -92,6 +92,9 @@ def run_daily_automation():
                 last_sent_prop = props.get("Last Sent", {}).get("date")
                 last_sent = last_sent_prop["start"] if last_sent_prop else ""
 
+                status_prop = props.get("Status", {}).get("select")
+                current_status = status_prop["name"] if status_prop else ""
+
                 # Handles lowercase 'send time' or uppercase 'Send Time'
                 send_time_prop = props.get("send time") or props.get("Send Time", {})
                 send_time = send_time_prop.get("rich_text", [])[0]["plain_text"].strip() if send_time_prop.get("rich_text") else "09:00"
@@ -99,6 +102,31 @@ def run_daily_automation():
                 # Skip if missing crucial contact info
                 if not number or not start_date:
                     continue 
+
+                # ==========================================
+                # 🌟 FREE MIDNIGHT RESET LOGIC 🌟
+                # ==========================================
+                # If it's a new day and they aren't marked as Pending, reset them in Notion!
+                if last_sent != today_str and current_status != "Pending":
+                    print(f"🔄 Midnight Reset: Changing {name}'s status back to 'Pending'.")
+                    try:
+                        reset_payload = {
+                            "properties": {
+                                "Status": {"select": {"name": "Pending"}},
+                                "Last Sent": None  # This wipes the old date completely
+                            }
+                        }
+                        requests.patch(
+                            f"https://api.notion.com/v1/pages/{student['id']}", 
+                            headers=notion_headers, 
+                            json=reset_payload
+                        )
+                        # Update local variables so the script knows they are ready for today
+                        last_sent = ""
+                        current_status = "Pending"
+                    except Exception as e:
+                        print(f"⚠️ Could not reset status for {name}: {e}")
+                # ==========================================
 
                 # 3. Prevent duplicate sends on the same day
                 if last_sent == today_str:
@@ -134,11 +162,10 @@ def run_daily_automation():
                                 whatsapp.send_poll(block["question"], block["options"])
 
                         # 5. Update Notion Database (Direct HTTP Request)
-                        # 5. Update Notion Database (Direct HTTP Request)
                         update_payload = {
                             "properties": {
                                 "Last Sent": {"date": {"start": today_str}},
-                                "Status": {"select": {"name": "Sent"}} # Changed from "select" to "status"
+                                "Status": {"select": {"name": "Sent"}} 
                             }
                         }
                         update_response = requests.patch(
@@ -162,7 +189,7 @@ def run_daily_automation():
                         try:
                             fail_payload = {
                                 "properties": {
-                                    "Status": {"select": {"name": "Failed"}} # Changed from "select" to "status"
+                                    "Status": {"select": {"name": "Failed"}} 
                                 }
                             }
                             requests.patch(
