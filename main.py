@@ -18,7 +18,7 @@ logging.basicConfig(
 def run_daily_automation():
     load_dotenv(dotenv_path=r"C:\EnglishCourseAutomation\.env")
     token = os.getenv("NOTION_TOKEN")
-    db_id = "4a36c0fd-2ef7-4eef-a400-94e409490d94"
+    db_id = "98664451cbdd8387a1bf0195aeb1c19c"
 
     print("Initializing Notion Reader...")
     reader = NotionCourseReader(token)
