@@ -57,29 +57,18 @@ class NotionCourseReader:
             f"day {course_day:02d}", f"day {course_day}"
         ]
         
-        try:
-            mod1_block = self.client.blocks.retrieve("beb64451cbdd8363af9b8109439bfb9b")
-            parent = mod1_block.get("parent", {})
-            parent_type = parent.get("type", "")
-            parent_id = parent.get(parent_type, "").replace("-", "")
-        except Exception as e:
-            raise Exception(f"Failed to access the anchor block. Ensure token is correct. Error: {e}")
-
-        target_module_id = self._deep_scan_for_keywords(parent_id, module_kws)
+        # Search directly inside the new anchor page
+        anchor_id = "beb64451cbdd8363af9b8109439bfb9b"
+        
+        target_module_id = self._deep_scan_for_keywords(anchor_id, module_kws)
         
         if not target_module_id:
-            if module_num == 1: 
-                target_module_id = "3dede9ba-0af7-8056-9873-db8257f4b67e"
-            else: 
-                raise Exception(f"Could not find '{module_kws[0]}' inside the course root.")
+            raise Exception(f"Could not find '{module_kws[0]}' on the page.")
 
         target_day_id = self._deep_scan_for_keywords(target_module_id, day_kws)
 
         if not target_day_id:
-            if module_num == 1 and day_num == 2: 
-                target_day_id = "92ede9ba-0af7-8367-a6f3-8117553aa985"
-            else: 
-                raise Exception(f"Could not find '{day_kws[0]}' or '{day_kws[2]}' strictly inside Module {module_num}.")
+            raise Exception(f"Could not find '{day_kws[0]}' strictly inside Module {module_num}.")
 
         return target_day_id
 
