@@ -23,7 +23,7 @@ class WhatsAppSender:
             )
 
         self.page = self.browser.pages[0]
-        self.page.goto("[https://web.whatsapp.com/](https://web.whatsapp.com/)", timeout=0)
+        self.page.goto("https://web.whatsapp.com/", timeout=0)
         print("Waiting for WhatsApp Web to load...")
         
         try:
