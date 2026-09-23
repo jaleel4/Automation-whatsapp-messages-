@@ -58,7 +58,7 @@ class NotionCourseReader:
         ]
         
         try:
-            mod1_block = self.client.blocks.retrieve("3dede9ba-0af7-8056-9873-db8257f4b67e")
+            mod1_block = self.client.blocks.retrieve("beb64451cbdd8363af9b8109439bfb9b")
             parent = mod1_block.get("parent", {})
             parent_type = parent.get("type", "")
             parent_id = parent.get(parent_type, "").replace("-", "")
