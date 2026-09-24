@@ -35,17 +35,16 @@ class NotionCourseReader:
             
         return title.lower()
 
-def _deep_scan_for_keywords(self, block_id, keywords):
+    def _deep_scan_for_keywords(self, block_id, keywords):
         blocks = self.get_blocks(block_id)
         for b in blocks:
             title = self._get_title(b)
             if title:
                 for kw in keywords:
                     if kw in title:
-                        # Prevent 'day 2' from accidentally matching 'day 29'
                         end_idx = title.find(kw) + len(kw)
                         if end_idx < len(title) and title[end_idx].isdigit():
-                            continue # This is a false match, keep looking!
+                            continue
                         return b["id"]
             
             if b.get("has_children"):
@@ -56,16 +55,13 @@ def _deep_scan_for_keywords(self, block_id, keywords):
 
     def find_course_day_page(self, module_num, day_num):
         module_kws = [f"module {module_num}", f"module {module_num:02d}"]
-        
         course_day = (module_num - 1) * 2 + day_num
         day_kws = [
             f"day {day_num:02d}", f"day {day_num}", 
             f"day {course_day:02d}", f"day {course_day}"
         ]
         
-        # Search directly inside the new anchor page
         anchor_id = "beb64451cbdd8363af9b8109439bfb9b"
-        
         target_module_id = self._deep_scan_for_keywords(anchor_id, module_kws)
         
         if not target_module_id:
@@ -116,7 +112,6 @@ def _deep_scan_for_keywords(self, block_id, keywords):
                     text = f"*🔗 Zoom Meeting:*\n{clean_text}"
                     force_break = True
 
-                # Single-block poll detection (Only run if NOT inside a toggle)
                 lines = [l.strip() for l in text.split('\n') if l.strip()]
                 if len(lines) >= 3 and any("?" in l for l in lines[:2]) and not inside_toggle:
                     q_idx = 0 if "?" in lines[0] else 1
@@ -144,7 +139,6 @@ def _deep_scan_for_keywords(self, block_id, keywords):
                 text = self.parse_rich_text(b["toggle"]["rich_text"])
                 parsed.append({"type": "text", "content": f"*{text}*", "force_break": True, "inside_toggle": inside_toggle})
                 if b["has_children"]:
-                    # Pass inside_toggle=True so children never become polls
                     parsed.extend(self.parse_blocks(b["id"], is_root=False, inside_toggle=True))
                 list_counter = 1
 
@@ -188,19 +182,16 @@ def _deep_scan_for_keywords(self, block_id, keywords):
                 list_counter = 1
 
         if is_root:
-            # --- MULTI-BLOCK POLL DETECTOR ---
             optimized_parsed = []
             i = 0
             while i < len(parsed):
                 item = parsed[i]
                 
-                # ONLY create polls if it's NOT inside a toggle
                 if item["type"] == "text" and "?" in item["content"] and not item.get("force_break") and not item.get("inside_toggle"):
                     options = []
                     j = i + 1
                     while j < len(parsed):
                         next_item = parsed[j]
-                        # Don't grab options that are inside toggles either
                         if next_item["type"] == "text" and not next_item.get("force_break") and not next_item.get("inside_toggle"):
                             content = next_item["content"]
                             if len(content) < 60 and "?" not in content and "http" not in content and not content.endswith('.'):
@@ -223,7 +214,6 @@ def _deep_scan_for_keywords(self, block_id, keywords):
                 
             parsed = optimized_parsed
 
-            # --- SMART TEXT MERGING ENGINE ---
             merged_results = []
             current_text_group = []
             
