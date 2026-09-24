@@ -35,12 +35,18 @@ class NotionCourseReader:
             
         return title.lower()
 
-    def _deep_scan_for_keywords(self, block_id, keywords):
+def _deep_scan_for_keywords(self, block_id, keywords):
         blocks = self.get_blocks(block_id)
         for b in blocks:
             title = self._get_title(b)
-            if title and any(kw in title for kw in keywords):
-                return b["id"]
+            if title:
+                for kw in keywords:
+                    if kw in title:
+                        # Prevent 'day 2' from accidentally matching 'day 29'
+                        end_idx = title.find(kw) + len(kw)
+                        if end_idx < len(title) and title[end_idx].isdigit():
+                            continue # This is a false match, keep looking!
+                        return b["id"]
             
             if b.get("has_children"):
                 found = self._deep_scan_for_keywords(b["id"], keywords)
