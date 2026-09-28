@@ -141,23 +141,26 @@ class WhatsAppSender:
         self.page.keyboard.press("Enter")
         time.sleep(1)
 
-    def send_image(self, image_path):
+def send_image(self, image_path):
         print("Attaching photo...")
         self._open_attachment_menu()
 
-        clicked = self._click_menu_item(["Photos & videos", "Photos and videos", "Photos"], ["image"])
-        if not clicked:
-            print("⚠️ Could not click Photos button visually, attempting direct input injection...")
-        
-        time.sleep(1)
-        
-        image_input = self.page.locator('input[type="file"][accept*="image"]').last
-        image_input.wait_for(state="attached", timeout=10000)
-        
-        print("Selecting photo file...")
-        image_input.set_input_files(image_path)
+        print("Intercepting file explorer and selecting photo...")
+        try:
+            # This intercepts the Windows pop-up invisibly
+            with self.page.expect_file_chooser(timeout=10000) as fc_info:
+                clicked = self._click_menu_item(["Photos & videos", "Photos and videos", "Photos"], ["image"])
+                if not clicked:
+                    print("⚠️ Could not click Photos button visually.")
+            
+            file_chooser = fc_info.value
+            file_chooser.set_files(image_path)
+        except Exception as e:
+            print(f"⚠️ File chooser failed, falling back to direct input: {e}")
+            image_input = self.page.locator('input[type="file"][accept*="image"]').last
+            image_input.set_input_files(image_path)
+            
         time.sleep(3)
-        
         print("Photo preview loaded.")
         
         send_btn = self.page.locator('[data-icon="send"], [aria-label="Send"]').last
