@@ -23,6 +23,7 @@ class WhatsAppSender:
             )
 
         self.page = self.browser.pages[0]
+        # FIXED: Plain text URL instead of broken markdown format
         self.page.goto("https://web.whatsapp.com/", timeout=0)
         print("Waiting for WhatsApp Web to load...")
         
@@ -113,11 +114,7 @@ class WhatsAppSender:
         # 1. Erase the "How to do" link from the main text block
         text = text.replace("How to do shadow Gym: https://youtu.be/RW4Ymk0mmno", "").strip()
         
-        # OPTIONAL: If you also want to completely erase the line "2. Shadow Gym (9 times)" from the text block, uncomment the line below:
-        # text = text.replace("2. Shadow Gym (9 times) : https://youtu.be/bv2312PBCRU", "").strip()
-        
         # 2. Block the standalone embedded "Shadow Gym 1: Heads" video from sending
-        # If the text contains the video ID and is very short, it's the standalone video embed, not your main text block.
         if "bv2312PBCRU" in text and len(text.strip()) < 60:
             print("🚫 Automatically skipping the 'Shadow Gym 1: Heads' embedded video...")
             return
@@ -141,7 +138,7 @@ class WhatsAppSender:
         self.page.keyboard.press("Enter")
         time.sleep(1)
 
-def send_image(self, image_path):
+    def send_image(self, image_path):
         print("Attaching photo...")
         self._open_attachment_menu()
 
