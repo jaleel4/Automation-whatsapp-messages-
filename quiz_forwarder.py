@@ -457,16 +457,15 @@ class WhatsAppQuizForwarder:
         return quizzes[-2:][quiz_index] if len(quizzes) >= 2 else (quizzes[0] if quizzes else None)
 
     def _click_forward_on_bubble(self, target_bubble):
-        """Triggers the Forward modal for either a Video post or a Quiz post without clicking the video player."""
+        """Triggers the Forward modal for either a Video post or a Quiz post."""
         print(f"  🎯 Target Post: '{target_bubble['preview']}...' (top={target_bubble['top']}, bottom={target_bubble['bottom']})")
 
-        # Hover near the top-left of the bubble (avoids the video Play button in the center)
         safe_hover_x = target_bubble["left"] + 80
         safe_hover_y = target_bubble["top"] + 22
         self.page.mouse.move(safe_hover_x, safe_hover_y)
         time.sleep(0.6)
 
-        # Method 1: Hover top-right of the green card (x ≈ 1148) & trigger Forward (exact method that worked on Quizzes)
+        # Method 1: Hover top-right of the green card (x ≈ 1148) & trigger Forward
         for tr_x in [1148, target_bubble["right"] - 18]:
             tr_y = target_bubble["top"] + 18
             print(f"  🖱️ Opening Forward from top-right ({tr_x}, {tr_y})...")
@@ -477,7 +476,7 @@ class WhatsAppQuizForwarder:
             if self._check_and_advance_to_modal():
                 return
 
-        # Method 2: Click the circular Forward icon outside/beside the bubble (x < 715)
+        # Method 2: Click the circular Forward icon outside/beside the bubble
         side_buttons = self.page.evaluate("""(qRect) => {
             const allBtns = Array.from(document.querySelectorAll('#main button, #main [role="button"], #main [data-icon]'));
             const results = [];
@@ -488,8 +487,6 @@ class WhatsAppQuizForwarder:
 
                 const cx = Math.round(r.left + r.width / 2);
                 const cy = Math.round(r.top + r.height / 2);
-
-                // Never click inside the center of the video (730 < x < 1120)
                 if (cx > 730 && cx < 1120) continue;
 
                 const aria = (b.getAttribute('aria-label') || b.getAttribute('title') || '').trim();
@@ -517,8 +514,11 @@ class WhatsAppQuizForwarder:
 
         raise Exception(f"Could not open Forward modal for post: {target_bubble['preview']}")
 
-    def _select_contact_in_modal(self, modal, search_input, contact):
-        """Tries matching the contact in WhatsApp's Forward modal by Raw Number, Last 10 Digits, or Name."""
+    def _select_contact_in_modal(self, search_input, contact):
+        """
+        Searches the contact inside the Forward popup and physically clicks the first matching
+        contact row/checkbox directly below the search bar.
+        """
         queries_to_try = [contact["raw_number"]]
         if len(contact["digits"]) >= 10:
             last_10 = contact["digits"][-10:]
@@ -527,6 +527,10 @@ class WhatsAppQuizForwarder:
         if contact["name"] and contact["name"] not in queries_to_try:
             queries_to_try.append(contact["name"])
 
+        s_box = search_input.bounding_box()
+        if not s_box:
+            return False
+
         for q in queries_to_try:
             search_input.click()
             self.page.keyboard.press("Control+A")
@@ -534,18 +538,71 @@ class WhatsAppQuizForwarder:
             time.sleep(0.3)
 
             search_input.fill(q)
-            time.sleep(1.4)
+            time.sleep(1.5)
 
-            try:
-                modal_text = modal.inner_text()
-                if "No results" in modal_text or "No chats" in modal_text:
-                    continue
-            except Exception:
-                pass
+            # Inspect the area directly below the search box inside the Forward modal
+            result_info = self.page.evaluate("""(sRect) => {
+                // Check if 'No results' is visible directly below the search box
+                const allNodes = Array.from(document.querySelectorAll('div, span'));
+                for (const n of allNodes) {
+                    const r = n.getBoundingClientRect();
+                    if (r.width === 0 || r.height === 0) continue;
+                    if (r.left >= sRect.x - 60 && r.right <= sRect.x + sRect.width + 60 &&
+                        r.top >= sRect.y + sRect.height && r.top <= sRect.y + 250) {
+                        const t = (n.innerText || '').trim().toLowerCase();
+                        if (t === 'no results found' || t.startsWith('no results') || t.startsWith('no chats')) {
+                            return { empty: true };
+                        }
+                    }
+                }
 
-            row_item = modal.locator('div[role="checkbox"], div[role="listitem"], div[role="button"]').first
-            if row_item.is_visible():
-                self.page.keyboard.press("Enter")
+                // Look for clickable contact rows or checkboxes directly below the search box
+                const candidates = Array.from(document.querySelectorAll(
+                    '[role="checkbox"], [role="listitem"], [role="row"], [data-animate-modal-body="true"] [role="button"]'
+                ));
+                const validRows = [];
+
+                for (const c of candidates) {
+                    const r = c.getBoundingClientRect();
+                    if (r.width < 15 || r.height < 15) continue;
+                    // Must be horizontally aligned with the search box and vertically below it
+                    if (r.left >= sRect.x - 80 && r.left <= sRect.x + sRect.width + 50 &&
+                        r.top >= sRect.y + sRect.height + 10 && r.top <= sRect.y + 320) {
+                        validRows.push({
+                            x: Math.round(r.left + Math.min(r.width / 2, 120)),
+                            y: Math.round(r.top + r.height / 2),
+                            top: r.top
+                        });
+                    }
+                }
+
+                validRows.sort((a, b) => a.top - b.top);
+                if (validRows.length > 0) {
+                    return { empty: false, foundRow: true, x: validRows[0].x, y: validRows[0].y };
+                }
+
+                // Fallback: Check if any contact name text is rendered in the first row spot (+85px below search box)
+                const fallbackX = Math.round(sRect.x + 120);
+                const fallbackY = Math.round(sRect.y + sRect.height + 85);
+                const elAtPoint = document.elementFromPoint(fallbackX, fallbackY);
+                if (elAtPoint) {
+                    const rowText = (elAtPoint.closest('[role="listitem"], [role="row"], div') || elAtPoint).innerText || '';
+                    if (rowText.trim().length > 1 && !rowText.toLowerCase().includes('no results')) {
+                        return { empty: false, foundRow: true, x: fallbackX, y: fallbackY };
+                    }
+                }
+
+                return { empty: true };
+            }""", s_box)
+
+            if result_info.get("empty"):
+                continue
+
+            if result_info.get("foundRow"):
+                click_x = result_info["x"]
+                click_y = result_info["y"]
+                print(f"     ✅ Found match for '{q}'! Clicking checkbox row at ({click_x}, {click_y})...")
+                self.page.mouse.click(click_x, click_y)
                 time.sleep(0.6)
                 return True
 
@@ -568,29 +625,31 @@ class WhatsAppQuizForwarder:
         if search_input is None:
             raise Exception("Forward popup did not open.")
 
-        modal = self.page.locator('div[role="dialog"]').last
-        if not modal.is_visible():
-            modal = self.page.locator("body")
-
         succeeded_contacts = []
 
         for contact in batch_contacts:
             print(f"  -> Selecting: {contact['name']} ({contact['raw_number']}) [Row {contact['excel_row']} | {contact['type']}]")
-            if self._select_contact_in_modal(modal, search_input, contact):
+            if self._select_contact_in_modal(search_input, contact):
                 succeeded_contacts.append(contact)
             else:
                 print(f"     ❌ Could not find '{contact['name']}' in this WhatsApp account.")
                 logging.warning(f"Contact not found in WhatsApp: {contact['name']} ({contact['raw_number']})")
 
         if succeeded_contacts:
+            # Find and click the green Send button at the bottom-right of the Forward popup
             send_btn = self.page.locator('[data-icon="send"], [aria-label="Send"], [data-icon*="send"]').last
             if send_btn.is_visible():
-                send_btn.click(force=True)
+                box = send_btn.bounding_box()
+                if box:
+                    self.page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                else:
+                    send_btn.click(force=True)
                 print(f"✅ Forwarded {label} to {len(succeeded_contacts)} people!")
                 time.sleep(3)
                 return succeeded_contacts
             else:
                 self.page.keyboard.press("Enter")
+                print(f"✅ Forwarded {label} to {len(succeeded_contacts)} people!")
                 time.sleep(3)
                 return succeeded_contacts
         else:
