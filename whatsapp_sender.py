@@ -1,5 +1,6 @@
 from playwright.sync_api import sync_playwright
 import time
+import re
 
 class WhatsAppSender:
     def __init__(self, profile_dir):
@@ -23,7 +24,6 @@ class WhatsAppSender:
             )
 
         self.page = self.browser.pages[0]
-        # FIXED: Plain text URL instead of broken markdown format
         self.page.goto("https://web.whatsapp.com/", timeout=0)
         print("Waiting for WhatsApp Web to load...")
         
@@ -118,11 +118,35 @@ class WhatsAppSender:
         if "bv2312PBCRU" in text and len(text.strip()) < 60:
             print("🚫 Automatically skipping the 'Shadow Gym 1: Heads' embedded video...")
             return
-            
-        # 3. If the text is completely empty after filtering, don't send a blank message
-        if not text:
+
+        # 3. Automatically split out the Shadow Gym Poll if it is merged at the bottom of the text
+        poll_match = re.search(r"(How many times did you repeat.*)", text, flags=re.IGNORECASE | re.DOTALL)
+        if poll_match:
+            main_text = text[:poll_match.start()].strip()
+            poll_block = poll_match.group(1).strip()
+
+            # Send the top "Today's Challenges" text first (if present)
+            if main_text:
+                self._send_raw_text(main_text)
+                time.sleep(2)
+
+            # Parse the bottom lines into Poll Question + Poll Options and send as a native WhatsApp Poll
+            poll_lines = [line.strip() for line in poll_block.split("\n") if line.strip()]
+            if len(poll_lines) >= 2:
+                question = poll_lines[0]
+                options = poll_lines[1:]
+                print(f"📊 Extracted Poll from text: '{question}' with {len(options)} options.")
+                self.send_poll(question, options)
+            elif len(poll_lines) == 1:
+                self.send_poll(poll_lines[0], ["Less than 3", "3-6 🆗", "6-9👍", "More than 9 👏"])
             return
 
+        # 4. If no poll is attached, send the text normally
+        if not text:
+            return
+        self._send_raw_text(text)
+
+    def _send_raw_text(self, text):
         composer = self.get_composer()
         composer.click()
         composer.focus()
