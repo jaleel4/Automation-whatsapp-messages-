@@ -28,7 +28,7 @@ PROFILE_DIR = os.path.join(BASE_DIR, "whatsapp_profile")
 BATCH_SIZE = 5
 
 # Set to None to automatically use today's date (1 to 31),
-# or set a specific number like TARGET_DAY = 1
+# or set a specific number like TARGET_DAY = 2
 TARGET_DAY = None
 MARK_TEXT = "SWAP"
 
@@ -369,18 +369,33 @@ class WhatsAppQuizForwarder:
         raise Exception("Could not find quizzes in the open Channel.")
 
     def _get_forward_search_box(self):
-        modal_inputs = self.page.locator('div[role="dialog"] div[contenteditable="true"], div[role="dialog"] input[type="text"]')
+        """Locates the search input inside the 'Forward message to' popup window."""
+        modal_inputs = self.page.locator(
+            'div[role="dialog"] div[contenteditable="true"], '
+            'div[role="dialog"] input[type="text"], '
+            'div[role="dialog"] [role="textbox"]'
+        )
         if modal_inputs.count() > 0 and modal_inputs.first.is_visible():
             return modal_inputs.first
+
+        all_inputs = self.page.locator('div[contenteditable="true"], input[type="text"], [role="textbox"]').all()
+        for inp in all_inputs:
+            if not inp.is_visible():
+                continue
+            box = inp.bounding_box()
+            # Center popup search bar sits at x > 350 and y < 420
+            if box and box["x"] > 350 and box["y"] < 420:
+                return inp
+
         return None
 
     def _check_and_advance_to_modal(self):
+        """Checks if the Forward modal is open, or clicks the Forward menu/button to open it."""
         if self._get_forward_search_box() is not None:
             return True
 
-        # Only click 'Forward' if it is inside a popup context menu (ul/li/role="application"), NOT the Channel Info sidebar
         fwd_menu = self.page.locator(
-            'ul li:has-text("Forward"), [role="application"] :has-text("Forward"), [data-animate-dropdown-item="true"]:has-text("Forward")'
+            'li:has-text("Forward"), div[role="button"]:has-text("Forward"), span:has-text("Forward")'
         ).first
         if fwd_menu.is_visible():
             fwd_menu.click(force=True)
@@ -389,7 +404,7 @@ class WhatsAppQuizForwarder:
                 return True
 
         bottom_fwd = self.page.locator(
-            '#main [data-icon*="forward"], #main button[title*="Forward"], #main [aria-label*="Forward"]'
+            '#main [data-icon*="forward"], button[title*="Forward"], [aria-label*="Forward"]'
         ).last
         if bottom_fwd.is_visible():
             bottom_fwd.click(force=True)
@@ -400,7 +415,7 @@ class WhatsAppQuizForwarder:
         return self._get_forward_search_box() is not None
 
     def _scroll_target_into_comfort_zone(self, item_type, quiz_index):
-        """Ensures the target Video or Quiz is comfortably inside the visible screen (top > 100 and bottom < 850)."""
+        """Scrolls the Channel view so the target Video or Quiz is cleanly on screen."""
         for _ in range(6):
             targets = self._find_channel_targets_js()
             quizzes = targets.get("quizzes", [])
@@ -421,23 +436,20 @@ class WhatsAppQuizForwarder:
                 time.sleep(0.8)
                 continue
 
-            # If post is cut off at the top (like top = -104), scroll up
-            if chosen["top"] < 110:
+            if chosen["top"] < 100:
                 self.page.mouse.move(850, 450)
-                self.page.mouse.wheel(0, -300)
+                self.page.mouse.wheel(0, -280)
                 time.sleep(0.8)
                 continue
 
-            # If post bottom is cut off at the bottom of the screen, scroll down
-            if chosen["bottom"] > 820:
+            if chosen["bottom"] > 880:
                 self.page.mouse.move(850, 450)
-                self.page.mouse.wheel(0, 300)
+                self.page.mouse.wheel(0, 280)
                 time.sleep(0.8)
                 continue
 
             return chosen
 
-        # Return best available after scrolling attempts
         targets = self._find_channel_targets_js()
         quizzes = targets.get("quizzes", [])
         if item_type == "video":
@@ -445,73 +457,60 @@ class WhatsAppQuizForwarder:
         return quizzes[-2:][quiz_index] if len(quizzes) >= 2 else (quizzes[0] if quizzes else None)
 
     def _click_forward_on_bubble(self, target_bubble):
-        """Clicks the bottom-left circular Forward button (x ≈ 710) or opens the quiz/video Forward modal."""
+        """Triggers the Forward modal for either a Video post or a Quiz post without clicking the video player."""
         print(f"  🎯 Target Post: '{target_bubble['preview']}...' (top={target_bubble['top']}, bottom={target_bubble['bottom']})")
 
-        mid_x = (target_bubble["left"] + target_bubble["right"]) // 2
-        mid_y = (target_bubble["top"] + target_bubble["bottom"]) // 2
-        self.page.mouse.move(mid_x, mid_y)
+        # Hover near the top-left of the bubble (avoids the video Play button in the center)
+        safe_hover_x = target_bubble["left"] + 80
+        safe_hover_y = target_bubble["top"] + 22
+        self.page.mouse.move(safe_hover_x, safe_hover_y)
         time.sleep(0.6)
 
-        nearby_buttons = self.page.evaluate("""(qRect) => {
+        # Method 1: Hover top-right of the green card (x ≈ 1148) & trigger Forward (exact method that worked on Quizzes)
+        for tr_x in [1148, target_bubble["right"] - 18]:
+            tr_y = target_bubble["top"] + 18
+            print(f"  🖱️ Opening Forward from top-right ({tr_x}, {tr_y})...")
+            self.page.mouse.move(tr_x, tr_y)
+            time.sleep(0.6)
+            self.page.mouse.click(tr_x, tr_y)
+            time.sleep(1.0)
+            if self._check_and_advance_to_modal():
+                return
+
+        # Method 2: Click the circular Forward icon outside/beside the bubble (x < 715)
+        side_buttons = self.page.evaluate("""(qRect) => {
             const allBtns = Array.from(document.querySelectorAll('#main button, #main [role="button"], #main [data-icon]'));
             const results = [];
-
             for (const b of allBtns) {
                 const r = b.getBoundingClientRect();
-                if (r.width === 0 || r.height === 0) continue;
-                // Exclude top Channel header bar (y < 105)
-                if (r.top < 105) continue;
+                if (r.width === 0 || r.height === 0 || r.top < 105) continue;
                 if (r.top < qRect.top - 15 || r.bottom > qRect.bottom + 65) continue;
 
-                const icon = b.getAttribute('data-icon') || 
-                             (b.querySelector('[data-icon]') ? b.querySelector('[data-icon]').getAttribute('data-icon') : '') || '';
+                const cx = Math.round(r.left + r.width / 2);
+                const cy = Math.round(r.top + r.height / 2);
+
+                // Never click inside the center of the video (730 < x < 1120)
+                if (cx > 730 && cx < 1120) continue;
+
                 const aria = (b.getAttribute('aria-label') || b.getAttribute('title') || '').trim();
                 const text = (b.innerText || '').trim();
+                if (text.includes('View responses') || aria.includes('View poll voters') || aria.toLowerCase().includes('react')) continue;
 
-                if (text.includes('View responses') || aria.includes('View poll voters')) continue;
-                if (icon.includes('smiley') || icon.includes('reaction') || aria.toLowerCase().includes('react')) continue;
-                if (icon.includes('play') || icon.includes('pip') || aria.toLowerCase().includes('play')) continue;
-
-                results.push({
-                    x: Math.round(r.left + r.width / 2),
-                    y: Math.round(r.top + r.height / 2),
-                    icon: icon,
-                    aria: aria,
-                    text: text
-                });
+                results.push({ x: cx, y: cy, aria: aria });
             }
             return results;
         }""", target_bubble)
 
-        # Priority 1: Click the bottom-left circular Forward button (sits near x ≈ 710, near the bottom of the bubble)
-        bottom_left_btns = [
-            b for b in nearby_buttons
-            if b["x"] < 850 and b["y"] >= target_bubble["bottom"] - 65
-        ]
-        for btn in bottom_left_btns:
-            print(f"  🖱️ Clicking bottom-left Forward button at ({btn['x']}, {btn['y']})...")
+        for btn in side_buttons:
+            print(f"  🖱️ Trying side/bottom-left button at ({btn['x']}, {btn['y']})...")
             self.page.mouse.click(btn["x"], btn["y"])
-            time.sleep(1.5)
+            time.sleep(1.2)
             if self._check_and_advance_to_modal():
                 return
 
-        # Priority 2: Click any other explicit Forward button found on the post
-        for btn in nearby_buttons:
-            if btn not in bottom_left_btns:
-                print(f"  🖱️ Clicking post action button at ({btn['x']}, {btn['y']})...")
-                self.page.mouse.click(btn["x"], btn["y"])
-                time.sleep(1.5)
-                if self._check_and_advance_to_modal():
-                    return
-
-        # Priority 3: Hover & click the top-right corner of the green bubble (at x = 1145, not 1252)
-        bubble_right_x = 1145
-        bubble_top_y = target_bubble["top"] + 18
-        print(f"  🖱️ Hovering top-right of green bubble ({bubble_right_x}, {bubble_top_y})...")
-        self.page.mouse.move(bubble_right_x, bubble_top_y)
-        time.sleep(0.8)
-        self.page.mouse.click(bubble_right_x, bubble_top_y)
+        # Method 3: Right-click context menu on the top edge of the bubble
+        print(f"  🖱️ Right-clicking post header at ({safe_hover_x}, {safe_hover_y})...")
+        self.page.mouse.click(safe_hover_x, safe_hover_y, button="right")
         time.sleep(1.2)
         if self._check_and_advance_to_modal():
             return
@@ -537,10 +536,12 @@ class WhatsAppQuizForwarder:
             search_input.fill(q)
             time.sleep(1.4)
 
-            # Check if WhatsApp says "No results found"
-            modal_text = modal.inner_text()
-            if "No results" in modal_text or "No chats" in modal_text:
-                continue
+            try:
+                modal_text = modal.inner_text()
+                if "No results" in modal_text or "No chats" in modal_text:
+                    continue
+            except Exception:
+                pass
 
             row_item = modal.locator('div[role="checkbox"], div[role="listitem"], div[role="button"]').first
             if row_item.is_visible():
@@ -568,6 +569,9 @@ class WhatsAppQuizForwarder:
             raise Exception("Forward popup did not open.")
 
         modal = self.page.locator('div[role="dialog"]').last
+        if not modal.is_visible():
+            modal = self.page.locator("body")
+
         succeeded_contacts = []
 
         for contact in batch_contacts:
@@ -579,7 +583,7 @@ class WhatsAppQuizForwarder:
                 logging.warning(f"Contact not found in WhatsApp: {contact['name']} ({contact['raw_number']})")
 
         if succeeded_contacts:
-            send_btn = self.page.locator('div[role="dialog"] [data-icon*="send"], div[role="dialog"] [aria-label="Send"], [data-icon="send"]').last
+            send_btn = self.page.locator('[data-icon="send"], [aria-label="Send"], [data-icon*="send"]').last
             if send_btn.is_visible():
                 send_btn.click(force=True)
                 print(f"✅ Forwarded {label} to {len(succeeded_contacts)} people!")
