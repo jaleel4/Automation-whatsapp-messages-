@@ -22,10 +22,15 @@ logging.basicConfig(
 # ================= CONFIGURATION =================
 EXCEL_FILENAME = "Hashims Community Group.xlsx"
 SHEET_NAME = "Fluence(09Sep)"
-CHANNEL_NAME = "in_Fluence_y (English Reading & Writing)"
-CHANNEL_SHORT_KEY = "in_Fluence_y"
+
+# Shared staging group where either you OR a teammate forwards the 3 daily posts:
+SOURCE_CHAT_NAME = "Community automation"
+
 PROFILE_DIR = os.path.join(BASE_DIR, "whatsapp_profile")
 BATCH_SIZE = 5
+
+# Constant footer line on the daily video post
+VIDEO_ANCHOR_LINE = "Do the Shadow Writing"
 
 # Set to None to automatically use today's date (1 to 31),
 # or set a specific number like TARGET_DAY = 2
@@ -33,8 +38,8 @@ TARGET_DAY = None
 MARK_TEXT = "SWAP"
 
 # Weekly send limits (checked across the last 7 day columns in Excel)
-# None = Unlimited (sent every day)
 WEEKLY_LIMITS = {
+    "test": None,
     "hot": None,
     "funnel 2": None,
     "warm": 2,
@@ -98,20 +103,33 @@ def load_and_sort_contacts(excel_path, sheet_name, day_num):
 
     df["Excel_Row"] = df.index + 2
     df["Type_Clean"] = df["Type"].astype(str).str.strip().str.lower()
+    df["Funnel_Clean"] = df.get("Funnel 2 State", pd.Series("", index=df.index)).astype(str).str.strip().str.lower()
 
-    def assign_priority(type_val):
-        if type_val in ["hot", "funnel 2"]:
-            return 1
-        elif type_val in ["warm", "fluencer", "fluvencer"]:
-            return 2
-        elif type_val in ["cool", "a_fluencer", "staff fluencer", "staff_fluencer"]:
-            return 3
-        return 99
+    # Check if ANY rows in the sheet are marked as 'Test' in Column D ('Type') or Column E ('Funnel 2 State')
+    test_rows = df[(df["Type_Clean"] == "test") | (df["Funnel_Clean"] == "test")].copy()
+    if len(test_rows) > 0:
+        print("\n" + "🧪" * 28)
+        print(f"🧪 TEST MODE ACTIVE: Found {len(test_rows)} row(s) marked 'Test'!")
+        print("🧪 Only sending to 'Test' contacts (All other contacts are safely ignored).")
+        print("🧪" * 28 + "\n")
+        valid_df = test_rows.reset_index(drop=True)
+        valid_df["Priority"] = 0
+        is_test_mode = True
+    else:
+        is_test_mode = False
 
-    df["Priority"] = df["Type_Clean"].apply(assign_priority)
+        def assign_priority(type_val):
+            if type_val in ["hot", "funnel 2"]:
+                return 1
+            elif type_val in ["warm", "fluencer", "fluvencer"]:
+                return 2
+            elif type_val in ["cool", "a_fluencer", "staff fluencer", "staff_fluencer"]:
+                return 3
+            return 99
 
-    valid_df = df[df["Priority"] < 99].copy()
-    valid_df = valid_df.sort_values(by="Priority", kind="mergesort").reset_index(drop=True)
+        df["Priority"] = df["Type_Clean"].apply(assign_priority)
+        valid_df = df[df["Priority"] < 99].copy()
+        valid_df = valid_df.sort_values(by="Priority", kind="mergesort").reset_index(drop=True)
 
     day_col = _find_day_col_name(valid_df.columns, day_num)
     if day_col is None:
@@ -125,12 +143,12 @@ def load_and_sort_contacts(excel_path, sheet_name, day_num):
         type_clean = row["Type_Clean"]
         current_mark = str(row.get(day_col, "")).strip()
 
-        if MARK_TEXT.lower() in current_mark.lower():
+        if not is_test_mode and MARK_TEXT.lower() in current_mark.lower():
             skipped_today += 1
             continue
 
         weekly_cap = WEEKLY_LIMITS.get(type_clean, None)
-        if weekly_cap is not None:
+        if not is_test_mode and weekly_cap is not None:
             sends_this_week = count_recent_sends(row, valid_df.columns, day_num, window_days=7)
             if sends_this_week >= weekly_cap:
                 skipped_weekly_cap += 1
@@ -152,12 +170,9 @@ def load_and_sort_contacts(excel_path, sheet_name, day_num):
         })
 
     print(
-        f"✅ Loaded {len(contacts)} eligible contacts for Day {day_num} "
+        f"✅ Loaded {len(contacts)} eligible contact(s) for Day {day_num} "
         f"(Skipped {skipped_today} already marked '{MARK_TEXT}' today, "
         f"and {skipped_weekly_cap} at their Warm/Cool weekly limit)."
-    )
-    logging.info(
-        f"Day {day_num}: {len(contacts)} eligible, {skipped_today} already SWAP, {skipped_weekly_cap} weekly capped."
     )
     return contacts
 
@@ -193,14 +208,11 @@ def mark_contacts_as_swap(excel_path, sheet_name, day_num, completed_contacts):
 
         wb.save(excel_path)
         wb.close()
-        print(f"💾 Marked '{MARK_TEXT}' in Day {day_num} column for {len(completed_contacts)} contacts.")
-        logging.info(f"Marked '{MARK_TEXT}' in Day {day_num} for {len(completed_contacts)} contacts.")
+        print(f"💾 Marked '{MARK_TEXT}' in Day {day_num} column for {len(completed_contacts)} contact(s).")
     except PermissionError:
         print("❌ Could not save Excel file! Please close 'Hashims Community Group.xlsx' in Excel so Python can update it.")
-        logging.error("PermissionError saving Excel file (file open in Excel).")
     except Exception as e:
         print(f"⚠️ Error saving '{MARK_TEXT}' to Excel: {e}")
-        logging.error(f"Error saving SWAP to Excel: {e}")
 
 
 class WhatsAppQuizForwarder:
@@ -237,11 +249,210 @@ class WhatsAppQuizForwarder:
         print("WhatsApp Web is ready.")
         time.sleep(2)
 
-    def _find_channel_targets_js(self):
-        """Locates both the Quizzes and the Video/Top Post sitting above the quizzes inside #main."""
-        return self.page.evaluate("""() => {
-            const rawNodes = Array.from(document.querySelectorAll('#main .message-in, #main .message-out, #main [role="row"]'));
-            const items = [];
+    def _force_scroll_to_very_bottom(self):
+        """Scrolls the chat message pane all the way to the bottom."""
+        for _ in range(2):
+            self.page.mouse.move(850, 500)
+            self.page.mouse.wheel(0, 4000)
+            self.page.evaluate("""() => {
+                const main = document.querySelector('#main');
+                if (!main) return;
+                const divs = Array.from(main.querySelectorAll('div'));
+                for (const d of divs) {
+                    if (d.scrollHeight > d.clientHeight + 50) {
+                        d.scrollTop = d.scrollHeight;
+                    }
+                }
+            }""")
+            time.sleep(0.4)
+
+    def _is_chat_actually_open(self, chat_name):
+        """Checks if the right-hand #main chat pane is open and matches the target group/chat."""
+        return self.page.evaluate("""(targetName) => {
+            const header = document.querySelector('#main header');
+            if (!header) return false;
+            const hText = (header.innerText || '').toLowerCase();
+            if (!hText.includes(targetName.toLowerCase())) return false;
+            const msgCount = document.querySelectorAll('#main .message-in, #main .message-out, #main [data-id]').length;
+            return msgCount > 0;
+        }""", chat_name)
+
+    def open_source_chat(self, chat_name):
+        """Forcefully ensures the source chat is open and settled, preventing stale DOM reads."""
+        # Wait 2 seconds before checking, so if WhatsApp just navigated to a recipient's chat,
+        # the DOM animation finishes and we don't accidentally read the old header!
+        time.sleep(2.0)
+
+        if self._is_chat_actually_open(chat_name):
+            print(f"✅ Source group '{chat_name}' is open on screen!")
+            return
+
+        print(f"🔍 Navigating back to source group: '{chat_name}'...")
+
+        # Clear sidebar search box explicitly
+        search_box = self.page.locator('#side [contenteditable="true"], #side input[type="text"], #side [role="textbox"]').first
+        if search_box.is_visible():
+            search_box.click()
+            self.page.keyboard.press("Control+A")
+            self.page.keyboard.press("Backspace")
+            time.sleep(0.5)
+
+            self.page.keyboard.insert_text(chat_name)
+            time.sleep(2.0)
+
+            # Look for the chat row in the search results
+            matched_row = self.page.locator("#pane-side [role='row']").get_by_text(chat_name, exact=False).first
+            if matched_row.is_visible():
+                box = matched_row.bounding_box()
+                if box:
+                    self.page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                else:
+                    matched_row.click(force=True)
+            else:
+                self.page.keyboard.press("ArrowDown")
+                time.sleep(0.3)
+                self.page.keyboard.press("Enter")
+
+            time.sleep(2.5)
+            if self._is_chat_actually_open(chat_name):
+                print(f"✅ Re-opened '{chat_name}' via search!")
+                return
+
+        print("\n" + "=" * 60)
+        print(f"👉 Please manually click on '{chat_name}' in the left chat list of WhatsApp Web!")
+        print("=" * 60)
+        for _ in range(60):
+            if self._is_chat_actually_open(chat_name):
+                print(f"✅ '{chat_name}' is now open! Resuming...")
+                time.sleep(1)
+                return
+            time.sleep(2)
+
+        raise Exception(f"Could not return to '{chat_name}'.")
+
+    def _get_forward_modal_and_search(self):
+        """Verifies the Forward modal dialog is actually open."""
+        dialog_inputs = self.page.locator(
+            'div[role="dialog"] div[contenteditable="true"], '
+            'div[role="dialog"] input[type="text"], '
+            '[data-animate-modal-popup="true"] div[contenteditable="true"], '
+            '[data-animate-modal-popup="true"] input[type="text"]'
+        ).all()
+        for inp in dialog_inputs:
+            if inp.is_visible():
+                return inp
+
+        has_forward_title = self.page.evaluate("""() => {
+            const bodyTxt = document.body.innerText || '';
+            return bodyTxt.includes('Forward message to') ||
+                   bodyTxt.includes('Forward update to') ||
+                   bodyTxt.includes('Forward messages to');
+        }""")
+        if has_forward_title:
+            all_inputs = self.page.locator('div[contenteditable="true"], input[type="text"]').all()
+            for inp in all_inputs:
+                if not inp.is_visible():
+                    continue
+                box = inp.bounding_box()
+                if box and 300 < box["x"] < 700 and 140 < box["y"] < 360:
+                    return inp
+
+        return None
+
+    def _close_modal_if_open(self):
+        """Only closes the Forward popup if it is actually open."""
+        if self._get_forward_modal_and_search() is not None:
+            close_btn = self.page.locator(
+                'div[role="dialog"] [aria-label="Close"], '
+                'div[role="dialog"] [data-icon="x"], '
+                '[data-animate-modal-popup="true"] [data-icon="x"]'
+            ).first
+            if close_btn.is_visible():
+                close_btn.click(force=True)
+            else:
+                self.page.keyboard.press("Escape")
+            time.sleep(0.6)
+
+    def _check_and_advance_to_modal(self):
+        """Handles the multi-select Forward flow."""
+        if self._get_forward_modal_and_search() is not None:
+            return True
+
+        fwd_menu = self.page.locator(
+            'li:has-text("Forward"), '
+            'div[role="button"]:has-text("Forward"), '
+            '[data-animate-dropdown-item="true"]:has-text("Forward"), '
+            'span:has-text("Forward")'
+        ).first
+        if fwd_menu.is_visible():
+            fwd_menu.click(force=True)
+            time.sleep(1.2)
+            if self._get_forward_modal_and_search() is not None:
+                return True
+
+        clicked_bottom_bar_fwd = self.page.evaluate("""() => {
+            const main = document.querySelector('#main');
+            if (!main) return false;
+
+            const candidates = Array.from(main.querySelectorAll(
+                '[data-icon*="forward"], button[title*="Forward"], [aria-label*="Forward"], button, [role="button"]'
+            ));
+            for (let i = candidates.length - 1; i >= 0; i--) {
+                const el = candidates[i];
+                const r = el.getBoundingClientRect();
+                if (r.width === 0 || r.height === 0) continue;
+
+                const icon = (el.getAttribute('data-icon') || (el.querySelector('[data-icon]') ? el.querySelector('[data-icon]').getAttribute('data-icon') : '') || '').toLowerCase();
+                const aria = (el.getAttribute('aria-label') || el.getAttribute('title') || '').toLowerCase();
+
+                if ((icon.includes('forward') || aria.includes('forward')) && r.top > 500) {
+                    const btn = el.closest('button') || el.closest('[role="button"]') || el;
+                    btn.click();
+                    return true;
+                }
+            }
+            return false;
+        }""")
+        if clicked_bottom_bar_fwd:
+            time.sleep(1.5)
+            if self._get_forward_modal_and_search() is not None:
+                return True
+
+        return self._get_forward_modal_and_search() is not None
+
+    def _find_and_click_forward_in_chat(self, item_type, quiz_index):
+        # 1. Double check we are explicitly inside the source chat
+        time.sleep(1.0)
+        if not self._is_chat_actually_open(SOURCE_CHAT_NAME):
+            self.open_source_chat(SOURCE_CHAT_NAME)
+
+        # 2. Strict Fail-Safe: If it STILL isn't the source chat, ABORT immediately!
+        if not self._is_chat_actually_open(SOURCE_CHAT_NAME):
+            raise Exception(f"❌ CRITICAL: Chat pane is NOT '{SOURCE_CHAT_NAME}'. Aborting to prevent sending from a stranger's chat.")
+
+        self._force_scroll_to_very_bottom()
+
+        if item_type == "video":
+            for _ in range(4):
+                has_video_post = self.page.evaluate("""(anchor) => {
+                    const main = document.querySelector('#main');
+                    if (!main) return false;
+                    const txt = (main.innerText || '').toLowerCase();
+                    const hasKw = txt.includes(anchor.toLowerCase()) || txt.includes('shadow writing') || txt.includes('rule: use');
+                    const hasVidTag = main.querySelector('video, [data-icon*="video"], [data-icon*="media-play"]') !== null;
+                    return hasKw || hasVidTag;
+                }""", VIDEO_ANCHOR_LINE)
+                if has_video_post:
+                    break
+                self.page.mouse.move(850, 450)
+                self.page.mouse.wheel(0, -350)
+                time.sleep(0.7)
+
+        target_box = self.page.evaluate("""({ itemType, quizIdx, videoAnchor }) => {
+            const rawNodes = Array.from(document.querySelectorAll(
+                '#main .message-in, #main .message-out, #main [data-id], #main [role="row"]'
+            ));
+            const posts = [];
 
             for (const r of rawNodes) {
                 const bubble = (r.classList.contains('message-in') || r.classList.contains('message-out'))
@@ -249,413 +460,343 @@ class WhatsAppQuizForwarder:
                     : (r.querySelector('.message-in, .message-out') || r);
 
                 const rect = bubble.getBoundingClientRect();
-                if (rect.width < 120 || rect.height < 45) continue;
+                if (rect.width < 140 || rect.height < 55 || rect.height > 1200) continue;
 
-                const duplicate = items.some(existing => Math.abs(existing.top - rect.top) < 20);
-                if (duplicate) continue;
+                const dup = posts.some(p => Math.abs(p.el.getBoundingClientRect().top - rect.top) < 25);
+                if (dup) continue;
 
                 const txt = (bubble.innerText || '').trim();
-                const isQuiz = txt.includes('View responses') || (txt.includes('A)') && txt.includes('B)'));
-                const hasVideoTag = bubble.querySelector('video, [data-icon*="video"], [data-icon*="media"], [data-icon*="play"], iframe, a[href*="youtu"]') !== null;
+                if (!txt && !bubble.querySelector('video, img')) continue;
 
-                items.push({
-                    top: Math.round(rect.top),
-                    bottom: Math.round(rect.bottom),
-                    left: Math.round(rect.left),
-                    right: Math.round(rect.right),
-                    width: Math.round(rect.width),
-                    height: Math.round(rect.height),
+                const isQuiz = (txt.includes('A)') && txt.includes('B)')) ||
+                               txt.includes('View responses') ||
+                               (bubble.querySelector('[data-icon*="poll"]') !== null);
+
+                const isDailyVideo = !isQuiz && (
+                    txt.toLowerCase().includes(videoAnchor.toLowerCase()) ||
+                    txt.toLowerCase().includes('shadow writing') ||
+                    txt.toLowerCase().includes('rule: use') ||
+                    bubble.querySelector('video, [data-icon*="video"], [data-icon*="play"]') !== null
+                );
+
+                posts.push({
+                    el: bubble,
+                    rowEl: bubble.closest('[role="row"]') || bubble.closest('[data-id]') || bubble.parentElement,
+                    top: rect.top,
                     isQuiz: isQuiz,
-                    hasVideoTag: hasVideoTag,
-                    preview: txt.split('\\n')[0].substring(0, 45) || (hasVideoTag ? '[Video Post]' : '[Channel Post]')
+                    isDailyVideo: isDailyVideo,
+                    text: txt
                 });
             }
 
-            items.sort((a, b) => a.top - b.top);
+            posts.sort((a, b) => a.top - b.top);
 
-            const quizzes = items.filter(i => i.isQuiz);
-            const nonQuizzes = items.filter(i => !i.isQuiz);
+            if (posts.length === 0) {
+                const headerTitle = document.querySelector('#main header') ? document.querySelector('#main header').innerText.split('\\n')[0] : 'Unknown';
+                return { error: 'No message bubbles detected inside open chat "' + headerTitle + '".' };
+            }
 
-            let videoTarget = null;
-            if (quizzes.length > 0) {
-                const firstQuizTop = quizzes[0].top;
-                const aboveQuizzes = nonQuizzes.filter(i => i.top < firstQuizTop - 10);
-                const videoPostsAbove = aboveQuizzes.filter(i => i.hasVideoTag);
+            const last3 = posts.slice(-3);
+            let chosen = null;
+            let matchedBy = '';
 
-                if (videoPostsAbove.length > 0) {
-                    videoTarget = videoPostsAbove[videoPostsAbove.length - 1];
-                } else if (aboveQuizzes.length > 0) {
-                    videoTarget = aboveQuizzes[aboveQuizzes.length - 1];
+            if (itemType === 'video') {
+                const videoMatches = posts.filter(p => p.isDailyVideo && !p.isQuiz);
+                if (videoMatches.length > 0) {
+                    chosen = videoMatches[videoMatches.length - 1];
+                    matchedBy = 'VIDEO ("Do the Shadow Writing")';
+                } else {
+                    const nonQuizzes = last3.filter(p => !p.isQuiz);
+                    chosen = nonQuizzes.length > 0 ? nonQuizzes[0] : last3[0];
+                    matchedBy = 'VIDEO (1st of 3 messages)';
+                }
+            } else {
+                const quizzes = posts.filter(p => p.isQuiz);
+                if (quizzes.length >= 2) {
+                    chosen = (quizIdx === 0) ? quizzes[quizzes.length - 2] : quizzes[quizzes.length - 1];
+                    matchedBy = (quizIdx === 0) ? 'QUIZ 1 (Older)' : 'QUIZ 2 (Latest)';
+                } else if (quizzes.length === 1) {
+                    chosen = quizzes[0];
+                    matchedBy = 'QUIZ (Single Quiz)';
+                } else if (last3.length >= 2) {
+                    chosen = (quizIdx === 0) ? last3[last3.length - 2] : last3[last3.length - 1];
+                    matchedBy = 'QUIZ (By position)';
+                } else {
+                    chosen = last3[last3.length - 1];
+                    matchedBy = 'QUIZ (Fallback)';
                 }
             }
-            if (!videoTarget && nonQuizzes.length > 0) {
-                videoTarget = nonQuizzes[nonQuizzes.length - 1];
+
+            const childSpans = Array.from(chosen.el.querySelectorAll('span, div'));
+            let anchorNode = chosen.el;
+            for (const s of childSpans) {
+                const st = (s.innerText || '').trim().toLowerCase();
+                if (itemType === 'video' && st.includes('do the shadow writing') && s.children.length <= 2) {
+                    anchorNode = s;
+                } else if (itemType !== 'video' && (st.includes('view channel') || st.includes('d)')) && s.children.length <= 2) {
+                    anchorNode = s;
+                }
             }
 
+            anchorNode.scrollIntoView({ block: 'center', behavior: 'instant' });
+
+            const finalRect = chosen.el.getBoundingClientRect();
+
+            const scope = chosen.rowEl || document.querySelector('#main');
+            const btns = Array.from(scope.querySelectorAll('button, [role="button"], [data-icon]'));
+            let sideForwardBtn = null;
+
+            for (const btn of btns) {
+                const r = btn.getBoundingClientRect();
+                if (r.width === 0 || r.height === 0 || r.top < 100) continue;
+                const icon = (btn.getAttribute('data-icon') || '').toLowerCase();
+                const aria = (btn.getAttribute('aria-label') || btn.getAttribute('title') || '').toLowerCase();
+
+                if (icon.includes('smiley') || icon.includes('react') || aria.includes('react')) continue;
+
+                const isLeftOfBubble = (r.right <= finalRect.left + 15 && r.left >= finalRect.left - 95);
+                const isRightOfBubble = (r.left >= finalRect.right - 15 && r.right <= finalRect.right + 95);
+                const isVerticallyAligned = (r.top >= finalRect.top - 10 && r.bottom <= finalRect.bottom + 10);
+
+                if (icon.includes('forward') || aria.includes('forward') ||
+                    ((isLeftOfBubble || isRightOfBubble) && isVerticallyAligned)) {
+                    sideForwardBtn = {
+                        x: Math.round(r.left + r.width / 2),
+                        y: Math.round(r.top + r.height / 2)
+                    };
+                    if (icon.includes('forward') || aria.includes('forward')) break;
+                }
+            }
+
+            const preview = chosen.text.replace(/\\n+/g, ' ').substring(0, 50);
             return {
-                quizzes: quizzes,
-                video: videoTarget
+                matchedBy: matchedBy,
+                preview: preview,
+                left: Math.round(finalRect.left),
+                right: Math.round(finalRect.right),
+                top: Math.round(finalRect.top),
+                bottom: Math.round(finalRect.bottom),
+                sideForwardBtn: sideForwardBtn
             };
-        }""")
+        }""", {"itemType": item_type, "quizIdx": quiz_index, "videoAnchor": VIDEO_ANCHOR_LINE})
 
-    def open_channel(self, full_name, short_key):
-        print(f"🔍 Opening Channels tab (below Status) to find: {full_name}")
+        time.sleep(0.8)
 
-        header = self.page.locator("#main header").first
-        if header.is_visible() and short_key.lower() in header.inner_text().lower():
-            if len(self._find_channel_targets_js().get("quizzes", [])) >= 1:
-                print("✅ Channel is already open on screen!")
-                return
+        if "error" in target_box:
+            raise Exception(target_box["error"])
 
-        clicked_channels_tab = False
-        channel_tab_selectors = [
-            '[aria-label="Channels"]',
-            '[title="Channels"]',
-            '[data-icon="newsletter-tab"]',
-            '[data-icon="channels"]',
-            '[data-navbar-item-index="2"]'
-        ]
-        for sel in channel_tab_selectors:
-            loc = self.page.locator(sel).first
-            if loc.is_visible():
-                loc.click(force=True)
-                clicked_channels_tab = True
-                time.sleep(2)
-                break
+        print(f"  🎯 Locked onto {target_box['matchedBy']}: '{target_box['preview']}...'")
 
-        if not clicked_channels_tab:
-            status_btn = self.page.locator('[aria-label="Status"], [title="Status"], [data-icon*="status"]').first
-            if status_btn.is_visible():
-                box = status_btn.bounding_box()
-                if box:
-                    self.page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] + 28)
-                    time.sleep(2)
-
-        channel_item = self.page.get_by_text(short_key, exact=False).first
-        if channel_item.is_visible():
-            channel_item.click(force=True)
-            time.sleep(3)
-            if len(self._find_channel_targets_js().get("quizzes", [])) >= 1:
-                print("✅ Opened channel from the Channels list!")
-                return
-
-        search_box = self.page.locator('[placeholder="Search"], [aria-label*="Search"], [contenteditable="true"]').first
-        if search_box.is_visible():
-            search_box.click()
-            self.page.keyboard.press("Control+A")
-            self.page.keyboard.press("Backspace")
-            time.sleep(0.5)
-            search_box.fill(short_key)
-            time.sleep(2)
-
-            match = self.page.get_by_text(short_key, exact=False).first
-            if match.is_visible():
-                match.click(force=True)
-                time.sleep(3)
-                if len(self._find_channel_targets_js().get("quizzes", [])) >= 1:
-                    print("✅ Opened channel via Channels search bar!")
-                    return
-
-        print("\n" + "=" * 60)
-        print(f"👉 Please click on the '{full_name}' channel once in WhatsApp Web.")
-        print("=" * 60)
-        for _ in range(60):
-            if len(self._find_channel_targets_js().get("quizzes", [])) >= 1:
-                print("✅ Channel detected! Starting batch forwarding...")
-                time.sleep(1)
-                return
-            time.sleep(2)
-
-        raise Exception("Could not find quizzes in the open Channel.")
-
-    def _get_forward_search_box(self):
-        """Locates the search input inside the 'Forward message to' popup window."""
-        modal_inputs = self.page.locator(
-            'div[role="dialog"] div[contenteditable="true"], '
-            'div[role="dialog"] input[type="text"], '
-            'div[role="dialog"] [role="textbox"]'
-        )
-        if modal_inputs.count() > 0 and modal_inputs.first.is_visible():
-            return modal_inputs.first
-
-        all_inputs = self.page.locator('div[contenteditable="true"], input[type="text"], [role="textbox"]').all()
-        for inp in all_inputs:
-            if not inp.is_visible():
-                continue
-            box = inp.bounding_box()
-            # Center popup search bar sits at x > 350 and y < 420
-            if box and box["x"] > 350 and box["y"] < 420:
-                return inp
-
-        return None
-
-    def _check_and_advance_to_modal(self):
-        """Checks if the Forward modal is open, or clicks the Forward menu/button to open it."""
-        if self._get_forward_search_box() is not None:
-            return True
-
-        fwd_menu = self.page.locator(
-            'li:has-text("Forward"), div[role="button"]:has-text("Forward"), span:has-text("Forward")'
-        ).first
-        if fwd_menu.is_visible():
-            fwd_menu.click(force=True)
-            time.sleep(1.2)
-            if self._get_forward_search_box() is not None:
-                return True
-
-        bottom_fwd = self.page.locator(
-            '#main [data-icon*="forward"], button[title*="Forward"], [aria-label*="Forward"]'
-        ).last
-        if bottom_fwd.is_visible():
-            bottom_fwd.click(force=True)
-            time.sleep(1.2)
-            if self._get_forward_search_box() is not None:
-                return True
-
-        return self._get_forward_search_box() is not None
-
-    def _scroll_target_into_comfort_zone(self, item_type, quiz_index):
-        """Scrolls the Channel view so the target Video or Quiz is cleanly on screen."""
-        for _ in range(6):
-            targets = self._find_channel_targets_js()
-            quizzes = targets.get("quizzes", [])
-            video = targets.get("video")
-
-            chosen = None
-            if item_type == "video":
-                chosen = video if video else (quizzes[0] if quizzes else None)
-            else:
-                if len(quizzes) >= 2:
-                    chosen = quizzes[-2:][quiz_index]
-                elif len(quizzes) == 1:
-                    chosen = quizzes[0]
-
-            if chosen is None:
-                self.page.mouse.move(850, 450)
-                self.page.mouse.wheel(0, -350 if item_type == "video" else 300)
-                time.sleep(0.8)
-                continue
-
-            if chosen["top"] < 100:
-                self.page.mouse.move(850, 450)
-                self.page.mouse.wheel(0, -280)
-                time.sleep(0.8)
-                continue
-
-            if chosen["bottom"] > 880:
-                self.page.mouse.move(850, 450)
-                self.page.mouse.wheel(0, 280)
-                time.sleep(0.8)
-                continue
-
-            return chosen
-
-        targets = self._find_channel_targets_js()
-        quizzes = targets.get("quizzes", [])
-        if item_type == "video":
-            return targets.get("video") or (quizzes[0] if quizzes else None)
-        return quizzes[-2:][quiz_index] if len(quizzes) >= 2 else (quizzes[0] if quizzes else None)
-
-    def _click_forward_on_bubble(self, target_bubble):
-        """Triggers the Forward modal for either a Video post or a Quiz post."""
-        print(f"  🎯 Target Post: '{target_bubble['preview']}...' (top={target_bubble['top']}, bottom={target_bubble['bottom']})")
-
-        safe_hover_x = target_bubble["left"] + 80
-        safe_hover_y = target_bubble["top"] + 22
-        self.page.mouse.move(safe_hover_x, safe_hover_y)
-        time.sleep(0.6)
-
-        # Method 1: Hover top-right of the green card (x ≈ 1148) & trigger Forward
-        for tr_x in [1148, target_bubble["right"] - 18]:
-            tr_y = target_bubble["top"] + 18
-            print(f"  🖱️ Opening Forward from top-right ({tr_x}, {tr_y})...")
-            self.page.mouse.move(tr_x, tr_y)
-            time.sleep(0.6)
-            self.page.mouse.click(tr_x, tr_y)
-            time.sleep(1.0)
-            if self._check_and_advance_to_modal():
-                return
-
-        # Method 2: Click the circular Forward icon outside/beside the bubble
-        side_buttons = self.page.evaluate("""(qRect) => {
-            const allBtns = Array.from(document.querySelectorAll('#main button, #main [role="button"], #main [data-icon]'));
-            const results = [];
-            for (const b of allBtns) {
-                const r = b.getBoundingClientRect();
-                if (r.width === 0 || r.height === 0 || r.top < 105) continue;
-                if (r.top < qRect.top - 15 || r.bottom > qRect.bottom + 65) continue;
-
-                const cx = Math.round(r.left + r.width / 2);
-                const cy = Math.round(r.top + r.height / 2);
-                if (cx > 730 && cx < 1120) continue;
-
-                const aria = (b.getAttribute('aria-label') || b.getAttribute('title') || '').trim();
-                const text = (b.innerText || '').trim();
-                if (text.includes('View responses') || aria.includes('View poll voters') || aria.toLowerCase().includes('react')) continue;
-
-                results.push({ x: cx, y: cy, aria: aria });
-            }
-            return results;
-        }""", target_bubble)
-
-        for btn in side_buttons:
-            print(f"  🖱️ Trying side/bottom-left button at ({btn['x']}, {btn['y']})...")
-            self.page.mouse.click(btn["x"], btn["y"])
+        if target_box.get("sideForwardBtn"):
+            fx = target_box["sideForwardBtn"]["x"]
+            fy = target_box["sideForwardBtn"]["y"]
+            self.page.mouse.move(fx, fy)
+            time.sleep(0.2)
+            self.page.mouse.click(fx, fy)
             time.sleep(1.2)
             if self._check_and_advance_to_modal():
                 return
 
-        # Method 3: Right-click context menu on the top edge of the bubble
-        print(f"  🖱️ Right-clicking post header at ({safe_hover_x}, {safe_hover_y})...")
-        self.page.mouse.click(safe_hover_x, safe_hover_y, button="right")
-        time.sleep(1.2)
+        safe_x = target_box["left"] + 80
+        safe_y = min(max(target_box["bottom"] - 55, 140), 780)
+        self.page.mouse.move(safe_x, safe_y)
+        time.sleep(0.3)
+        self.page.mouse.click(safe_x, safe_y, button="right")
+        time.sleep(1.0)
         if self._check_and_advance_to_modal():
             return
 
-        raise Exception(f"Could not open Forward modal for post: {target_bubble['preview']}")
+        tr_x = target_box["right"] - 16
+        tr_y = max(target_box["top"] + 16, 130)
+        self.page.mouse.move(target_box["left"] + 100, min(max(target_box["bottom"] - 60, 150), 750))
+        time.sleep(0.4)
+        self.page.mouse.move(tr_x, tr_y)
+        time.sleep(0.5)
+        self.page.mouse.click(tr_x, tr_y)
+        time.sleep(1.0)
+        if self._check_and_advance_to_modal():
+            return
 
-    def _select_contact_in_modal(self, search_input, contact):
-        """
-        Searches the contact inside the Forward popup and physically clicks the first matching
-        contact row/checkbox directly below the search bar.
-        """
-        queries_to_try = [contact["raw_number"]]
+        raise Exception(f"Could not open Forward modal for {target_box['matchedBy']}.")
+
+    def _select_contact_in_modal(self, contact):
+        queries_to_try = []
+        if contact["raw_number"] and contact["raw_number"].lower() != "nan":
+            queries_to_try.append(contact["raw_number"])
         if len(contact["digits"]) >= 10:
             last_10 = contact["digits"][-10:]
             if last_10 not in queries_to_try:
                 queries_to_try.append(last_10)
-        if contact["name"] and contact["name"] not in queries_to_try:
+        if contact["name"] and contact["name"].lower() != "nan" and contact["name"] not in queries_to_try:
             queries_to_try.append(contact["name"])
 
-        s_box = search_input.bounding_box()
-        if not s_box:
-            return False
-
         for q in queries_to_try:
-            search_input.click()
+            search_input = self._get_forward_modal_and_search()
+            if search_input is None:
+                return "MODAL_CLOSED"
+
+            try:
+                s_box = search_input.bounding_box()
+                if not s_box:
+                    return "MODAL_CLOSED"
+                self.page.mouse.click(s_box["x"] + 30, s_box["y"] + s_box["height"] / 2)
+            except Exception:
+                return "MODAL_CLOSED"
+
             self.page.keyboard.press("Control+A")
             self.page.keyboard.press("Backspace")
             time.sleep(0.3)
 
-            search_input.fill(q)
-            time.sleep(1.5)
+            self.page.keyboard.insert_text(q)
+            time.sleep(1.6)
 
-            # Inspect the area directly below the search box inside the Forward modal
-            result_info = self.page.evaluate("""(sRect) => {
-                // Check if 'No results' is visible directly below the search box
-                const allNodes = Array.from(document.querySelectorAll('div, span'));
-                for (const n of allNodes) {
-                    const r = n.getBoundingClientRect();
-                    if (r.width === 0 || r.height === 0) continue;
-                    if (r.left >= sRect.x - 60 && r.right <= sRect.x + sRect.width + 60 &&
-                        r.top >= sRect.y + sRect.height && r.top <= sRect.y + 250) {
-                        const t = (n.innerText || '').trim().toLowerCase();
-                        if (t === 'no results found' || t.startsWith('no results') || t.startsWith('no chats')) {
-                            return { empty: true };
-                        }
-                    }
+            row_info = self.page.evaluate("""(sRect) => {
+                const dialog = document.querySelector('div[role="dialog"], [data-animate-modal-popup="true"]') || document.body;
+                const dText = (dialog.innerText || '').toLowerCase();
+                if (dText.includes('no results') || dText.includes('no chats') || dText.includes('no contacts')) {
+                    return { found: false, reason: 'No results text visible' };
                 }
 
-                // Look for clickable contact rows or checkboxes directly below the search box
-                const candidates = Array.from(document.querySelectorAll(
-                    '[role="checkbox"], [role="listitem"], [role="row"], [data-animate-modal-body="true"] [role="button"]'
-                ));
-                const validRows = [];
+                const minRowY = sRect.y + sRect.height + 50;
+                const maxRowY = sRect.y + sRect.height + 155;
 
-                for (const c of candidates) {
-                    const r = c.getBoundingClientRect();
-                    if (r.width < 15 || r.height < 15) continue;
-                    // Must be horizontally aligned with the search box and vertically below it
-                    if (r.left >= sRect.x - 80 && r.left <= sRect.x + sRect.width + 50 &&
-                        r.top >= sRect.y + sRect.height + 10 && r.top <= sRect.y + 320) {
-                        validRows.push({
-                            x: Math.round(r.left + Math.min(r.width / 2, 120)),
-                            y: Math.round(r.top + r.height / 2),
-                            top: r.top
+                const rowCandidates = [];
+                const allNodes = Array.from(dialog.querySelectorAll('span[dir="auto"], span[title], div[role="checkbox"], input[type="checkbox"], [role="listitem"], [role="button"]'));
+
+                for (const n of allNodes) {
+                    const r = n.getBoundingClientRect();
+                    if (r.width === 0 || r.height === 0 || r.height > 110) continue;
+                    const cy = r.top + r.height / 2;
+                    if (cy >= minRowY && cy <= maxRowY && r.left >= sRect.x - 60 && r.right <= sRect.x + sRect.width + 80) {
+                        const label = (n.innerText || n.getAttribute('title') || '').trim().split('\\n')[0];
+                        const low = label.toLowerCase();
+                        if (!label || low === 'recent chats' || low === 'contacts' || low === 'groups' || low === 'frequently contacted') continue;
+
+                        rowCandidates.push({
+                            y: Math.round(cy),
+                            x: Math.round(r.left + Math.min(r.width / 2, 80)),
+                            label: label
                         });
                     }
                 }
 
-                validRows.sort((a, b) => a.top - b.top);
-                if (validRows.length > 0) {
-                    return { empty: false, foundRow: true, x: validRows[0].x, y: validRows[0].y };
+                if (rowCandidates.length > 0) {
+                    rowCandidates.sort((a, b) => a.y - b.y);
+                    const topHit = rowCandidates[0];
+                    return {
+                        found: true,
+                        rowY: topHit.y,
+                        rowX: topHit.x,
+                        label: topHit.label
+                    };
                 }
 
-                // Fallback: Check if any contact name text is rendered in the first row spot (+85px below search box)
-                const fallbackX = Math.round(sRect.x + 120);
-                const fallbackY = Math.round(sRect.y + sRect.height + 85);
-                const elAtPoint = document.elementFromPoint(fallbackX, fallbackY);
-                if (elAtPoint) {
-                    const rowText = (elAtPoint.closest('[role="listitem"], [role="row"], div') || elAtPoint).innerText || '';
-                    if (rowText.trim().length > 1 && !rowText.toLowerCase().includes('no results')) {
-                        return { empty: false, foundRow: true, x: fallbackX, y: fallbackY };
-                    }
-                }
-
-                return { empty: true };
+                return { found: false, reason: 'No contact elements in row band' };
             }""", s_box)
 
-            if result_info.get("empty"):
+            if not row_info.get("found"):
                 continue
 
-            if result_info.get("foundRow"):
-                click_x = result_info["x"]
-                click_y = result_info["y"]
-                print(f"     ✅ Found match for '{q}'! Clicking checkbox row at ({click_x}, {click_y})...")
-                self.page.mouse.click(click_x, click_y)
-                time.sleep(0.6)
-                return True
+            click_x = int(row_info["rowX"])
+            click_y = int(row_info["rowY"])
+            print(f"     ✅ Clicking match '{row_info.get('label')}' ONCE at ({click_x}, {click_y})...")
+            self.page.mouse.move(click_x, click_y)
+            time.sleep(0.2)
+            self.page.mouse.click(click_x, click_y)
+            time.sleep(0.8)
+            return "SELECTED"
 
-        return False
+        search_input = self._get_forward_modal_and_search()
+        if search_input is not None:
+            try:
+                s_box = search_input.bounding_box()
+                if s_box:
+                    self.page.mouse.click(s_box["x"] + 30, s_box["y"] + s_box["height"] / 2)
+                    self.page.keyboard.press("Control+A")
+                    self.page.keyboard.press("Backspace")
+                    time.sleep(0.3)
+            except Exception:
+                pass
+        return "NOT_FOUND"
+
+    def _click_modal_send_button(self):
+        """Clicks the green Send button in the Forward modal and EXPLICITLY WAITS for the screen transition."""
+        send_btn = self.page.locator(
+            'div[role="dialog"] [data-icon*="send"], '
+            'div[role="dialog"] [aria-label="Send"], '
+            '[data-animate-modal-popup="true"] [data-icon*="send"], '
+            '[data-animate-modal-popup="true"] [aria-label="Send"], '
+            '[data-icon*="send"], [aria-label="Send"]'
+        ).last
+        
+        button_clicked = False
+        if send_btn.is_visible():
+            box = send_btn.bounding_box()
+            if box:
+                self.page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                button_clicked = True
+            else:
+                send_btn.click(force=True)
+                button_clicked = True
+
+        if not button_clicked:
+            clicked_green_btn = self.page.evaluate("""() => {
+                const dialog = document.querySelector('div[role="dialog"], [data-animate-modal-popup="true"]') || document.body;
+                const btns = Array.from(dialog.querySelectorAll('button, [role="button"], span[data-icon]'));
+                for (let i = btns.length - 1; i >= 0; i--) {
+                    const r = btns[i].getBoundingClientRect();
+                    if (r.width >= 28 && r.width <= 75 && r.top > 420 && r.left > 420 && r.left < 780) {
+                        btns[i].click();
+                        return true;
+                    }
+                }
+                return false;
+            }""")
+            if not clicked_green_btn:
+                self.page.keyboard.press("Enter")
+
+        # MANDATORY WAIT: WhatsApp instantly navigates to the recipient's chat.
+        # We must freeze the bot to let the DOM settle, or the next batch will read a stale screen!
+        print("  ⏳ Waiting for UI to transition to the forwarded chat...")
+        time.sleep(3.5)
 
     def forward_item_to_batch(self, item_type, quiz_index, batch_contacts):
-        self.page.keyboard.press("Escape")
-        time.sleep(0.5)
+        self._close_modal_if_open()
 
-        label = "Video / Top Post" if item_type == "video" else ("Quiz 1 (Older)" if quiz_index == 0 else "Quiz 2 (Latest)")
-        print(f"\n🔄 Selecting {label} for batch of {len(batch_contacts)} contacts...")
+        label = "Video ('Do the Shadow Writing')" if item_type == "video" else ("Quiz 1 (Older)" if quiz_index == 0 else "Quiz 2 (Latest)")
+        print(f"\n🔄 Selecting {label} from '{SOURCE_CHAT_NAME}' for batch of {len(batch_contacts)} contact(s)...")
 
-        target_bubble = self._scroll_target_into_comfort_zone(item_type, quiz_index)
-        if not target_bubble:
-            raise Exception(f"Could not locate {label} inside the Channel.")
+        self._find_and_click_forward_in_chat(item_type, quiz_index)
 
-        self._click_forward_on_bubble(target_bubble)
-
-        search_input = self._get_forward_search_box()
-        if search_input is None:
+        if self._get_forward_modal_and_search() is None:
             raise Exception("Forward popup did not open.")
 
         succeeded_contacts = []
 
         for contact in batch_contacts:
             print(f"  -> Selecting: {contact['name']} ({contact['raw_number']}) [Row {contact['excel_row']} | {contact['type']}]")
-            if self._select_contact_in_modal(search_input, contact):
+            status = self._select_contact_in_modal(contact)
+            if status == "SELECTED":
                 succeeded_contacts.append(contact)
+            elif status == "MODAL_CLOSED":
+                print("     ⚠️ Forward popup closed early; Re-opening popup for remaining contacts...")
+                self._find_and_click_forward_in_chat(item_type, quiz_index)
+                if self._get_forward_modal_and_search() is not None:
+                    retry_status = self._select_contact_in_modal(contact)
+                    if retry_status == "SELECTED":
+                        succeeded_contacts.append(contact)
             else:
                 print(f"     ❌ Could not find '{contact['name']}' in this WhatsApp account.")
-                logging.warning(f"Contact not found in WhatsApp: {contact['name']} ({contact['raw_number']})")
+                logging.warning(f"Contact not found: {contact['name']} ({contact['raw_number']})")
 
         if succeeded_contacts:
-            # Find and click the green Send button at the bottom-right of the Forward popup
-            send_btn = self.page.locator('[data-icon="send"], [aria-label="Send"], [data-icon*="send"]').last
-            if send_btn.is_visible():
-                box = send_btn.bounding_box()
-                if box:
-                    self.page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-                else:
-                    send_btn.click(force=True)
-                print(f"✅ Forwarded {label} to {len(succeeded_contacts)} people!")
-                time.sleep(3)
-                return succeeded_contacts
-            else:
-                self.page.keyboard.press("Enter")
-                print(f"✅ Forwarded {label} to {len(succeeded_contacts)} people!")
-                time.sleep(3)
-                return succeeded_contacts
+            if self._get_forward_modal_and_search() is not None:
+                self._click_modal_send_button()
+            print(f"✅ Forwarded {label} to {len(succeeded_contacts)} contact(s)!")
+            return succeeded_contacts
         else:
-            print("  ⚠️ None of the 5 contacts in this batch exist on this WhatsApp. Closing popup...")
-            self.page.keyboard.press("Escape")
-            time.sleep(1)
+            print("  ⚠️ None of the contacts in this batch matched. Closing popup...")
+            self._close_modal_if_open()
             return []
 
     def close(self):
@@ -665,7 +806,7 @@ class WhatsAppQuizForwarder:
 
 def run_quiz_automation():
     print("=" * 60)
-    print("🚀 FLUENCE CHANNEL VIDEO & QUIZ FORWARDER")
+    print(f"🚀 FLUENCE VIDEO & QUIZ FORWARDER (SOURCE: '{SOURCE_CHAT_NAME}')")
     print("=" * 60)
 
     excel_path = resolve_excel_path()
@@ -679,7 +820,7 @@ def run_quiz_automation():
     bot = WhatsAppQuizForwarder(PROFILE_DIR)
 
     try:
-        bot.open_channel(CHANNEL_NAME, CHANNEL_SHORT_KEY)
+        bot.open_source_chat(SOURCE_CHAT_NAME)
 
         total_batches = (len(contacts) + BATCH_SIZE - 1) // BATCH_SIZE
         quiz_turn_counter = 0
@@ -699,7 +840,7 @@ def run_quiz_automation():
                 quiz_turn_counter += 1
 
             print(f"\n--- Batch {batch_idx + 1} of {total_batches} (Day {day_num} | Mode: {item_type.upper()}) ---")
-            bot.open_channel(CHANNEL_NAME, CHANNEL_SHORT_KEY)
+            
             sent_contacts = bot.forward_item_to_batch(item_type, quiz_to_send, batch)
 
             if sent_contacts:
