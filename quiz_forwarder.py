@@ -23,7 +23,7 @@ logging.basicConfig(
 EXCEL_FILENAME = "Hashims Community Group.xlsx"
 SHEET_NAME = "Fluence(09Sep)"
 
-# Shared staging group where either you OR a teammate forwards the 3 daily posts:
+# Exact name of your shared staging group:
 SOURCE_CHAT_NAME = "Community automation"
 
 PROFILE_DIR = os.path.join(BASE_DIR, "whatsapp_profile")
@@ -266,25 +266,28 @@ class WhatsAppQuizForwarder:
             }""")
             time.sleep(0.4)
 
-    def _is_chat_actually_open(self, chat_name):
-        """Checks if the right-hand #main chat pane is open and matches the target group/chat."""
-        return self.page.evaluate("""(targetName) => {
+    def _is_chat_actually_open(self, target_name):
+        """Strictly checks if the right-hand #main chat pane is open to exactly target_name."""
+        return self.page.evaluate("""(name) => {
             const header = document.querySelector('#main header');
             if (!header) return false;
-            const hText = (header.innerText || '').toLowerCase();
-            if (!hText.includes(targetName.toLowerCase())) return false;
+            
+            const titleEl = header.querySelector('span[dir="auto"][title], div[dir="auto"]');
+            if (!titleEl) return false;
+            
+            const currentTitle = (titleEl.getAttribute('title') || titleEl.innerText || '').trim().toLowerCase();
+            if (currentTitle !== name.toLowerCase()) return false;
+            
             const msgCount = document.querySelectorAll('#main .message-in, #main .message-out, #main [data-id]').length;
             return msgCount > 0;
-        }""", chat_name)
+        }""", target_name)
 
     def open_source_chat(self, chat_name):
-        """Forcefully ensures the source chat is open and settled, preventing stale DOM reads."""
-        # Wait 2 seconds before checking, so if WhatsApp just navigated to a recipient's chat,
-        # the DOM animation finishes and we don't accidentally read the old header!
+        """Strictly opens 'Community automation' and verifies it didn't jump to a wrong chat."""
+        # Wait to let the UI finish any transitions from the previous send
         time.sleep(2.0)
 
         if self._is_chat_actually_open(chat_name):
-            print(f"✅ Source group '{chat_name}' is open on screen!")
             return
 
         print(f"🔍 Navigating back to source group: '{chat_name}'...")
@@ -300,35 +303,46 @@ class WhatsAppQuizForwarder:
             self.page.keyboard.insert_text(chat_name)
             time.sleep(2.0)
 
-            # Look for the chat row in the search results
-            matched_row = self.page.locator("#pane-side [role='row']").get_by_text(chat_name, exact=False).first
-            if matched_row.is_visible():
-                box = matched_row.bounding_box()
+            # Look strictly for the explicit title attribute to prevent clicking someone who recently typed "Community automation"
+            exact_match_row = self.page.locator(f"#pane-side span[title='{chat_name}']").first
+            
+            if exact_match_row.is_visible():
+                box = exact_match_row.bounding_box()
                 if box:
                     self.page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
                 else:
-                    matched_row.click(force=True)
+                    exact_match_row.click(force=True)
             else:
-                self.page.keyboard.press("ArrowDown")
-                time.sleep(0.3)
-                self.page.keyboard.press("Enter")
+                # Fallback only if the exact title isn't found
+                matched_row = self.page.locator("#pane-side [role='row']").get_by_text(chat_name, exact=False).first
+                if matched_row.is_visible():
+                    matched_row.click(force=True)
+                else:
+                    self.page.keyboard.press("Enter")
 
             time.sleep(2.5)
+            
             if self._is_chat_actually_open(chat_name):
-                print(f"✅ Re-opened '{chat_name}' via search!")
+                print(f"✅ Re-opened '{chat_name}' successfully!")
                 return
+            else:
+                # Clear search and try again so we don't accidentally read another chat's messages
+                search_box.click()
+                self.page.keyboard.press("Control+A")
+                self.page.keyboard.press("Backspace")
+                time.sleep(1.0)
 
         print("\n" + "=" * 60)
         print(f"👉 Please manually click on '{chat_name}' in the left chat list of WhatsApp Web!")
         print("=" * 60)
         for _ in range(60):
             if self._is_chat_actually_open(chat_name):
-                print(f"✅ '{chat_name}' is now open! Resuming...")
+                print(f"✅ '{chat_name}' is now explicitly verified! Resuming...")
                 time.sleep(1)
                 return
             time.sleep(2)
 
-        raise Exception(f"Could not return to '{chat_name}'.")
+        raise Exception(f"Could not return to '{chat_name}'. Script aborted to prevent sending wrong messages.")
 
     def _get_forward_modal_and_search(self):
         """Verifies the Forward modal dialog is actually open."""
@@ -421,14 +435,17 @@ class WhatsAppQuizForwarder:
         return self._get_forward_modal_and_search() is not None
 
     def _find_and_click_forward_in_chat(self, item_type, quiz_index):
-        # 1. Double check we are explicitly inside the source chat
-        time.sleep(1.0)
-        if not self._is_chat_actually_open(SOURCE_CHAT_NAME):
-            self.open_source_chat(SOURCE_CHAT_NAME)
+        """
+        Finds the target post inside 'Community automation' and securely ensures
+        we are not reading from the wrong chat window.
+        """
+        # 1. Force navigation back to the correct source chat
+        self.open_source_chat(SOURCE_CHAT_NAME)
 
-        # 2. Strict Fail-Safe: If it STILL isn't the source chat, ABORT immediately!
+        # 2. STRICT FAIL-SAFE: Double check we are explicitly in 'Community automation'.
+        # If the bot somehow landed in 'John Doe', it will crash here instead of sending John's messages!
         if not self._is_chat_actually_open(SOURCE_CHAT_NAME):
-            raise Exception(f"❌ CRITICAL: Chat pane is NOT '{SOURCE_CHAT_NAME}'. Aborting to prevent sending from a stranger's chat.")
+            raise Exception(f"❌ CRITICAL ERROR: Expected to be in '{SOURCE_CHAT_NAME}', but WhatsApp opened a different chat. Aborting to protect personal chats.")
 
         self._force_scroll_to_very_bottom()
 
@@ -492,38 +509,30 @@ class WhatsAppQuizForwarder:
             posts.sort((a, b) => a.top - b.top);
 
             if (posts.length === 0) {
-                const headerTitle = document.querySelector('#main header') ? document.querySelector('#main header').innerText.split('\\n')[0] : 'Unknown';
-                return { error: 'No message bubbles detected inside open chat "' + headerTitle + '".' };
+                return { error: 'No message bubbles detected inside open chat.' };
             }
 
             const last3 = posts.slice(-3);
             let chosen = null;
-            let matchedBy = '';
 
             if (itemType === 'video') {
                 const videoMatches = posts.filter(p => p.isDailyVideo && !p.isQuiz);
                 if (videoMatches.length > 0) {
                     chosen = videoMatches[videoMatches.length - 1];
-                    matchedBy = 'VIDEO ("Do the Shadow Writing")';
                 } else {
                     const nonQuizzes = last3.filter(p => !p.isQuiz);
                     chosen = nonQuizzes.length > 0 ? nonQuizzes[0] : last3[0];
-                    matchedBy = 'VIDEO (1st of 3 messages)';
                 }
             } else {
                 const quizzes = posts.filter(p => p.isQuiz);
                 if (quizzes.length >= 2) {
                     chosen = (quizIdx === 0) ? quizzes[quizzes.length - 2] : quizzes[quizzes.length - 1];
-                    matchedBy = (quizIdx === 0) ? 'QUIZ 1 (Older)' : 'QUIZ 2 (Latest)';
                 } else if (quizzes.length === 1) {
                     chosen = quizzes[0];
-                    matchedBy = 'QUIZ (Single Quiz)';
                 } else if (last3.length >= 2) {
                     chosen = (quizIdx === 0) ? last3[last3.length - 2] : last3[last3.length - 1];
-                    matchedBy = 'QUIZ (By position)';
                 } else {
                     chosen = last3[last3.length - 1];
-                    matchedBy = 'QUIZ (Fallback)';
                 }
             }
 
@@ -568,10 +577,7 @@ class WhatsAppQuizForwarder:
                 }
             }
 
-            const preview = chosen.text.replace(/\\n+/g, ' ').substring(0, 50);
             return {
-                matchedBy: matchedBy,
-                preview: preview,
                 left: Math.round(finalRect.left),
                 right: Math.round(finalRect.right),
                 top: Math.round(finalRect.top),
@@ -585,8 +591,7 @@ class WhatsAppQuizForwarder:
         if "error" in target_box:
             raise Exception(target_box["error"])
 
-        print(f"  🎯 Locked onto {target_box['matchedBy']}: '{target_box['preview']}...'")
-
+        # 1. Click the circular Forward arrow button sitting beside the bubble
         if target_box.get("sideForwardBtn"):
             fx = target_box["sideForwardBtn"]["x"]
             fy = target_box["sideForwardBtn"]["y"]
@@ -597,15 +602,7 @@ class WhatsAppQuizForwarder:
             if self._check_and_advance_to_modal():
                 return
 
-        safe_x = target_box["left"] + 80
-        safe_y = min(max(target_box["bottom"] - 55, 140), 780)
-        self.page.mouse.move(safe_x, safe_y)
-        time.sleep(0.3)
-        self.page.mouse.click(safe_x, safe_y, button="right")
-        time.sleep(1.0)
-        if self._check_and_advance_to_modal():
-            return
-
+        # 2. Hover inside the bubble so the top-right dropdown arrow (v) appears, then click it -> Forward -> Bottom-right Forward icon
         tr_x = target_box["right"] - 16
         tr_y = max(target_box["top"] + 16, 130)
         self.page.mouse.move(target_box["left"] + 100, min(max(target_box["bottom"] - 60, 150), 750))
@@ -617,7 +614,15 @@ class WhatsAppQuizForwarder:
         if self._check_and_advance_to_modal():
             return
 
-        raise Exception(f"Could not open Forward modal for {target_box['matchedBy']}.")
+        # 3. Right-click inside the safe bottom text area of the bubble -> Click 'Forward' -> Bottom-right Forward icon
+        safe_x = target_box["left"] + 120
+        safe_y = min(max(target_box["bottom"] - 65, 150), 750)
+        self.page.mouse.click(safe_x, safe_y, button="right")
+        time.sleep(1.0)
+        if self._check_and_advance_to_modal():
+            return
+
+        raise Exception("Could not open Forward modal for the selected message.")
 
     def _select_contact_in_modal(self, contact):
         queries_to_try = []
@@ -699,7 +704,7 @@ class WhatsAppQuizForwarder:
 
             click_x = int(row_info["rowX"])
             click_y = int(row_info["rowY"])
-            print(f"     ✅ Clicking match '{row_info.get('label')}' ONCE at ({click_x}, {click_y})...")
+            print(f"       ✅ Selected -> {row_info.get('label')}")
             self.page.mouse.move(click_x, click_y)
             time.sleep(0.2)
             self.page.mouse.click(click_x, click_y)
@@ -720,7 +725,6 @@ class WhatsAppQuizForwarder:
         return "NOT_FOUND"
 
     def _click_modal_send_button(self):
-        """Clicks the green Send button in the Forward modal and EXPLICITLY WAITS for the screen transition."""
         send_btn = self.page.locator(
             'div[role="dialog"] [data-icon*="send"], '
             'div[role="dialog"] [aria-label="Send"], '
@@ -755,17 +759,11 @@ class WhatsAppQuizForwarder:
             if not clicked_green_btn:
                 self.page.keyboard.press("Enter")
 
-        # MANDATORY WAIT: WhatsApp instantly navigates to the recipient's chat.
-        # We must freeze the bot to let the DOM settle, or the next batch will read a stale screen!
-        print("  ⏳ Waiting for UI to transition to the forwarded chat...")
+        # Wait to let the UI finish redirecting to the recipient's personal chat
         time.sleep(3.5)
 
     def forward_item_to_batch(self, item_type, quiz_index, batch_contacts):
         self._close_modal_if_open()
-
-        label = "Video ('Do the Shadow Writing')" if item_type == "video" else ("Quiz 1 (Older)" if quiz_index == 0 else "Quiz 2 (Latest)")
-        print(f"\n🔄 Selecting {label} from '{SOURCE_CHAT_NAME}' for batch of {len(batch_contacts)} contact(s)...")
-
         self._find_and_click_forward_in_chat(item_type, quiz_index)
 
         if self._get_forward_modal_and_search() is None:
@@ -774,28 +772,26 @@ class WhatsAppQuizForwarder:
         succeeded_contacts = []
 
         for contact in batch_contacts:
-            print(f"  -> Selecting: {contact['name']} ({contact['raw_number']}) [Row {contact['excel_row']} | {contact['type']}]")
+            print(f"    🔎 Searching: {contact['name']} ({contact['raw_number']})")
             status = self._select_contact_in_modal(contact)
             if status == "SELECTED":
                 succeeded_contacts.append(contact)
             elif status == "MODAL_CLOSED":
-                print("     ⚠️ Forward popup closed early; Re-opening popup for remaining contacts...")
+                print("       ⚠️ Forward popup closed early; Re-opening popup for remaining contacts...")
                 self._find_and_click_forward_in_chat(item_type, quiz_index)
                 if self._get_forward_modal_and_search() is not None:
                     retry_status = self._select_contact_in_modal(contact)
                     if retry_status == "SELECTED":
                         succeeded_contacts.append(contact)
             else:
-                print(f"     ❌ Could not find '{contact['name']}' in this WhatsApp account.")
+                print(f"       ❌ Not Found in WhatsApp: {contact['name']}")
                 logging.warning(f"Contact not found: {contact['name']} ({contact['raw_number']})")
 
         if succeeded_contacts:
             if self._get_forward_modal_and_search() is not None:
                 self._click_modal_send_button()
-            print(f"✅ Forwarded {label} to {len(succeeded_contacts)} contact(s)!")
             return succeeded_contacts
         else:
-            print("  ⚠️ None of the contacts in this batch matched. Closing popup...")
             self._close_modal_if_open()
             return []
 
@@ -805,21 +801,22 @@ class WhatsAppQuizForwarder:
 
 
 def run_quiz_automation():
-    print("=" * 60)
+    print("=" * 70)
     print(f"🚀 FLUENCE VIDEO & QUIZ FORWARDER (SOURCE: '{SOURCE_CHAT_NAME}')")
-    print("=" * 60)
+    print("=" * 70)
 
     excel_path = resolve_excel_path()
     day_num = get_target_day()
     contacts = load_and_sort_contacts(excel_path, SHEET_NAME, day_num)
 
     if not contacts:
-        print(f"🎉 All eligible contacts are already completed for Day {day_num}! Nothing to send.")
+        print(f"\n🎉 All eligible contacts are already completed for Day {day_num}! Nothing to send.")
         return
 
     bot = WhatsAppQuizForwarder(PROFILE_DIR)
 
     try:
+        # Pre-open the chat once so we're ready
         bot.open_source_chat(SOURCE_CHAT_NAME)
 
         total_batches = (len(contacts) + BATCH_SIZE - 1) // BATCH_SIZE
@@ -839,23 +836,38 @@ def run_quiz_automation():
                 quiz_to_send = quiz_turn_counter % 2
                 quiz_turn_counter += 1
 
-            print(f"\n--- Batch {batch_idx + 1} of {total_batches} (Day {day_num} | Mode: {item_type.upper()}) ---")
+            label = "VIDEO (Shadow Writing)" if item_type == "video" else (f"QUIZ {quiz_to_send + 1}")
+            
+            # --- BEAUTIFUL BATCH TRACKING DASHBOARD ---
+            print("\n" + "═" * 70)
+            print(f"📦 BATCH {batch_idx + 1} OF {total_batches} | Contacts {start + 1} to {min(end, len(contacts))} out of {len(contacts)}")
+            print(f"🎯 ACTION: Forwarding {label}")
+            print(f"📋 TARGETS IN THIS BATCH:")
+            for i, c in enumerate(batch, 1):
+                print(f"   {i}. {c['name']} - {c['raw_number']} ({c['type']})")
+            print("-" * 70)
             
             sent_contacts = bot.forward_item_to_batch(item_type, quiz_to_send, batch)
 
             if sent_contacts:
                 mark_contacts_as_swap(excel_path, SHEET_NAME, day_num, sent_contacts)
+                print(f"\n✅ SUCCESS! Forwarded to {len(sent_contacts)}/{len(batch)} contacts.")
+                for sc in sent_contacts:
+                    print(f"   ✓ {sc['name']}")
+            else:
+                print(f"\n⚠️ Skipped: None of the {len(batch)} contacts in this batch were found in WhatsApp.")
 
-        print(f"\n🎉 All batches for Day {day_num} have been forwarded and marked '{MARK_TEXT}'!")
+        print("\n" + "=" * 70)
+        print(f"🎉 DONE! All {total_batches} batches for Day {day_num} have been forwarded and marked '{MARK_TEXT}'!")
+        print("=" * 70)
         logging.info(f"Completed all {total_batches} batches for Day {day_num}.")
+    
+    except Exception as e:
+        logging.exception("Critical error in Quiz Forwarder:")
+        print(f"\n❌ CRITICAL ERROR:\n{e}")
     finally:
         bot.close()
 
 
 if __name__ == "__main__":
-    try:
-        run_quiz_automation()
-    except Exception as e:
-        logging.exception("Critical error in Quiz Forwarder:")
-        print(f"\n❌ Critical Error: {e}")
-    input("\nPress Enter to exit...")
+    run_quiz_automation()
