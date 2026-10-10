@@ -111,7 +111,7 @@ def load_and_sort_contacts(excel_path, sheet_name, day_num):
         is_test_mode = False
 
         def assign_priority(type_val):
-            # If the Type column contains "funnel" and "2", or "hot", it gets Priority 1 immediately!
+            type_val = str(type_val).lower()
             if "hot" in type_val or ("funnel" in type_val and "2" in type_val):
                 return 1
             elif type_val in ["warm", "fluencer", "fluvencer"]:
