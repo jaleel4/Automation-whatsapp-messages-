@@ -29,19 +29,18 @@ SOURCE_CHAT_NAME = "Community automation"
 PROFILE_DIR = os.path.join(BASE_DIR, "whatsapp_profile")
 BATCH_SIZE = 5
 
-# Constant footer line on the daily video post
 VIDEO_ANCHOR_LINE = "Do the Shadow Writing"
-
-# Set to None to automatically use today's date (1 to 31),
-# or set a specific number like TARGET_DAY = 2
 TARGET_DAY = None
 MARK_TEXT = "SWAP"
 
 # Weekly send limits (checked across the last 7 day columns in Excel)
+# Added multiple variations of "funnel 2" to catch any Excel typos!
 WEEKLY_LIMITS = {
     "test": None,
     "hot": None,
     "funnel 2": None,
+    "funnel2": None,
+    "funnel  2": None,
     "warm": 2,
     "fluencer": 2,
     "fluvencer": 2,
@@ -54,7 +53,6 @@ WEEKLY_LIMITS = {
 
 
 def resolve_excel_path():
-    """Finds the Excel file next to the .exe launcher first, then falls back to C:\\EnglishCourseAutomation."""
     exe_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
     candidate_paths = [
         os.path.join(exe_dir, EXCEL_FILENAME),
@@ -80,7 +78,6 @@ def _find_day_col_name(df_columns, d):
 
 
 def count_recent_sends(row, df_columns, current_day, window_days=7):
-    """Counts how many times a contact was marked with 'SWAP' or 'SWCP' in the last 7 days."""
     start_day = max(1, current_day - (window_days - 1))
     count = 0
     for d in range(start_day, current_day + 1):
@@ -102,10 +99,10 @@ def load_and_sort_contacts(excel_path, sheet_name, day_num):
     df = pd.read_excel(excel_path, sheet_name=sheet_name)
 
     df["Excel_Row"] = df.index + 2
-    df["Type_Clean"] = df["Type"].astype(str).str.strip().str.lower()
+    # Clean up the type column aggressively to prevent missed contacts due to typos
+    df["Type_Clean"] = df["Type"].astype(str).str.strip().str.lower().str.replace("  ", " ")
     df["Funnel_Clean"] = df.get("Funnel 2 State", pd.Series("", index=df.index)).astype(str).str.strip().str.lower()
 
-    # Check if ANY rows in the sheet are marked as 'Test' in Column D ('Type') or Column E ('Funnel 2 State')
     test_rows = df[(df["Type_Clean"] == "test") | (df["Funnel_Clean"] == "test")].copy()
     if len(test_rows) > 0:
         print("\n" + "🧪" * 28)
@@ -119,7 +116,8 @@ def load_and_sort_contacts(excel_path, sheet_name, day_num):
         is_test_mode = False
 
         def assign_priority(type_val):
-            if type_val in ["hot", "funnel 2"]:
+            # If the Type column contains "funnel" and "2", or "hot", it gets Priority 1 immediately!
+            if "hot" in type_val or ("funnel" in type_val and "2" in type_val):
                 return 1
             elif type_val in ["warm", "fluencer", "fluvencer"]:
                 return 2
@@ -148,6 +146,10 @@ def load_and_sort_contacts(excel_path, sheet_name, day_num):
             continue
 
         weekly_cap = WEEKLY_LIMITS.get(type_clean, None)
+        # Catch any weird spellings of funnel 2 for the weekly limit bypass
+        if "funnel" in type_clean and "2" in type_clean:
+            weekly_cap = None
+            
         if not is_test_mode and weekly_cap is not None:
             sends_this_week = count_recent_sends(row, valid_df.columns, day_num, window_days=7)
             if sends_this_week >= weekly_cap:
@@ -178,7 +180,6 @@ def load_and_sort_contacts(excel_path, sheet_name, day_num):
 
 
 def mark_contacts_as_swap(excel_path, sheet_name, day_num, completed_contacts):
-    """Writes 'SWAP' into the specific date column for each completed contact."""
     if not completed_contacts:
         return
 
@@ -250,7 +251,6 @@ class WhatsAppQuizForwarder:
         time.sleep(2)
 
     def _force_scroll_to_very_bottom(self):
-        """Scrolls the chat message pane all the way to the bottom."""
         for _ in range(2):
             self.page.mouse.move(850, 500)
             self.page.mouse.wheel(0, 4000)
@@ -267,7 +267,6 @@ class WhatsAppQuizForwarder:
             time.sleep(0.4)
 
     def _is_chat_actually_open(self, target_name):
-        """Strictly checks if the right-hand #main chat pane is open to exactly target_name."""
         return self.page.evaluate("""(name) => {
             const header = document.querySelector('#main header');
             if (!header) return false;
@@ -283,8 +282,6 @@ class WhatsAppQuizForwarder:
         }""", target_name)
 
     def open_source_chat(self, chat_name):
-        """Strictly opens 'Community automation' and verifies it didn't jump to a wrong chat."""
-        # Wait to let the UI finish any transitions from the previous send
         time.sleep(2.0)
 
         if self._is_chat_actually_open(chat_name):
@@ -292,7 +289,6 @@ class WhatsAppQuizForwarder:
 
         print(f"🔍 Navigating back to source group: '{chat_name}'...")
 
-        # Clear sidebar search box explicitly
         search_box = self.page.locator('#side [contenteditable="true"], #side input[type="text"], #side [role="textbox"]').first
         if search_box.is_visible():
             search_box.click()
@@ -303,7 +299,6 @@ class WhatsAppQuizForwarder:
             self.page.keyboard.insert_text(chat_name)
             time.sleep(2.0)
 
-            # Look strictly for the explicit title attribute to prevent clicking someone who recently typed "Community automation"
             exact_match_row = self.page.locator(f"#pane-side span[title='{chat_name}']").first
             
             if exact_match_row.is_visible():
@@ -313,7 +308,6 @@ class WhatsAppQuizForwarder:
                 else:
                     exact_match_row.click(force=True)
             else:
-                # Fallback only if the exact title isn't found
                 matched_row = self.page.locator("#pane-side [role='row']").get_by_text(chat_name, exact=False).first
                 if matched_row.is_visible():
                     matched_row.click(force=True)
@@ -326,7 +320,6 @@ class WhatsAppQuizForwarder:
                 print(f"✅ Re-opened '{chat_name}' successfully!")
                 return
             else:
-                # Clear search and try again so we don't accidentally read another chat's messages
                 search_box.click()
                 self.page.keyboard.press("Control+A")
                 self.page.keyboard.press("Backspace")
@@ -345,7 +338,6 @@ class WhatsAppQuizForwarder:
         raise Exception(f"Could not return to '{chat_name}'. Script aborted to prevent sending wrong messages.")
 
     def _get_forward_modal_and_search(self):
-        """Verifies the Forward modal dialog is actually open."""
         dialog_inputs = self.page.locator(
             'div[role="dialog"] div[contenteditable="true"], '
             'div[role="dialog"] input[type="text"], '
@@ -374,7 +366,6 @@ class WhatsAppQuizForwarder:
         return None
 
     def _close_modal_if_open(self):
-        """Only closes the Forward popup if it is actually open."""
         if self._get_forward_modal_and_search() is not None:
             close_btn = self.page.locator(
                 'div[role="dialog"] [aria-label="Close"], '
@@ -388,7 +379,6 @@ class WhatsAppQuizForwarder:
             time.sleep(0.6)
 
     def _check_and_advance_to_modal(self):
-        """Handles the multi-select Forward flow."""
         if self._get_forward_modal_and_search() is not None:
             return True
 
@@ -435,15 +425,8 @@ class WhatsAppQuizForwarder:
         return self._get_forward_modal_and_search() is not None
 
     def _find_and_click_forward_in_chat(self, item_type, quiz_index):
-        """
-        Finds the target post inside 'Community automation' and securely ensures
-        we are not reading from the wrong chat window.
-        """
-        # 1. Force navigation back to the correct source chat
         self.open_source_chat(SOURCE_CHAT_NAME)
 
-        # 2. STRICT FAIL-SAFE: Double check we are explicitly in 'Community automation'.
-        # If the bot somehow landed in 'John Doe', it will crash here instead of sending John's messages!
         if not self._is_chat_actually_open(SOURCE_CHAT_NAME):
             raise Exception(f"❌ CRITICAL ERROR: Expected to be in '{SOURCE_CHAT_NAME}', but WhatsApp opened a different chat. Aborting to protect personal chats.")
 
@@ -591,7 +574,6 @@ class WhatsAppQuizForwarder:
         if "error" in target_box:
             raise Exception(target_box["error"])
 
-        # 1. Click the circular Forward arrow button sitting beside the bubble
         if target_box.get("sideForwardBtn"):
             fx = target_box["sideForwardBtn"]["x"]
             fy = target_box["sideForwardBtn"]["y"]
@@ -602,7 +584,6 @@ class WhatsAppQuizForwarder:
             if self._check_and_advance_to_modal():
                 return
 
-        # 2. Hover inside the bubble so the top-right dropdown arrow (v) appears, then click it -> Forward -> Bottom-right Forward icon
         tr_x = target_box["right"] - 16
         tr_y = max(target_box["top"] + 16, 130)
         self.page.mouse.move(target_box["left"] + 100, min(max(target_box["bottom"] - 60, 150), 750))
@@ -614,7 +595,6 @@ class WhatsAppQuizForwarder:
         if self._check_and_advance_to_modal():
             return
 
-        # 3. Right-click inside the safe bottom text area of the bubble -> Click 'Forward' -> Bottom-right Forward icon
         safe_x = target_box["left"] + 120
         safe_y = min(max(target_box["bottom"] - 65, 150), 750)
         self.page.mouse.click(safe_x, safe_y, button="right")
@@ -759,7 +739,6 @@ class WhatsAppQuizForwarder:
             if not clicked_green_btn:
                 self.page.keyboard.press("Enter")
 
-        # Wait to let the UI finish redirecting to the recipient's personal chat
         time.sleep(3.5)
 
     def forward_item_to_batch(self, item_type, quiz_index, batch_contacts):
@@ -816,7 +795,6 @@ def run_quiz_automation():
     bot = WhatsAppQuizForwarder(PROFILE_DIR)
 
     try:
-        # Pre-open the chat once so we're ready
         bot.open_source_chat(SOURCE_CHAT_NAME)
 
         total_batches = (len(contacts) + BATCH_SIZE - 1) // BATCH_SIZE
@@ -827,7 +805,6 @@ def run_quiz_automation():
             end = start + BATCH_SIZE
             batch = contacts[start:end]
 
-            # Alternates every batch: 5 Video -> 5 Quiz 1 -> 5 Video -> 5 Quiz 2
             if batch_idx % 2 == 0:
                 item_type = "video"
                 quiz_to_send = 0
@@ -838,7 +815,6 @@ def run_quiz_automation():
 
             label = "VIDEO (Shadow Writing)" if item_type == "video" else (f"QUIZ {quiz_to_send + 1}")
             
-            # --- BEAUTIFUL BATCH TRACKING DASHBOARD ---
             print("\n" + "═" * 70)
             print(f"📦 BATCH {batch_idx + 1} OF {total_batches} | Contacts {start + 1} to {min(end, len(contacts))} out of {len(contacts)}")
             print(f"🎯 ACTION: Forwarding {label}")
