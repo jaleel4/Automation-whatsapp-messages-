@@ -380,4 +380,466 @@ class WhatsAppQuizForwarder:
         fwd_menu = self.page.locator(
             'li:has-text("Forward"), '
             'div[role="button"]:has-text("Forward"), '
-            '[data-animate-dropdown-item="true"]:has-
+            '[data-animate-dropdown-item="true"]:has-text("Forward"), '
+            'span:has-text("Forward")'
+        ).first
+        
+        if fwd_menu.is_visible():
+            fwd_menu.click(force=True)
+            time.sleep(1.2)
+            if self._get_forward_modal_and_search() is not None:
+                return True
+
+        clicked_bottom_bar_fwd = self.page.evaluate("""() => {
+            const main = document.querySelector('#main');
+            if (!main) return false;
+
+            const candidates = Array.from(main.querySelectorAll(
+                '[data-icon*="forward"], button[title*="Forward"], [aria-label*="Forward"], button, [role="button"]'
+            ));
+            for (let i = candidates.length - 1; i >= 0; i--) {
+                const el = candidates[i];
+                const r = el.getBoundingClientRect();
+                if (r.width === 0 || r.height === 0) continue;
+
+                const icon = (el.getAttribute('data-icon') || (el.querySelector('[data-icon]') ? el.querySelector('[data-icon]').getAttribute('data-icon') : '') || '').toLowerCase();
+                const aria = (el.getAttribute('aria-label') || el.getAttribute('title') || '').toLowerCase();
+
+                if ((icon.includes('forward') || aria.includes('forward')) && r.top > 500) {
+                    const btn = el.closest('button') || el.closest('[role="button"]') || el;
+                    btn.click();
+                    return true;
+                }
+            }
+            return false;
+        }""")
+        if clicked_bottom_bar_fwd:
+            time.sleep(1.5)
+            if self._get_forward_modal_and_search() is not None:
+                return True
+
+        return self._get_forward_modal_and_search() is not None
+
+    def _find_and_click_forward_in_chat(self, item_type, quiz_index):
+        self.open_source_chat(SOURCE_CHAT_NAME)
+
+        if not self._is_chat_actually_open(SOURCE_CHAT_NAME):
+            raise Exception(f"❌ CRITICAL ERROR: Expected to be in '{SOURCE_CHAT_NAME}', but WhatsApp opened a different chat. Aborting to protect personal chats.")
+
+        self._force_scroll_to_very_bottom()
+
+        if item_type == "video":
+            for _ in range(4):
+                has_video_post = self.page.evaluate("""(anchor) => {
+                    const main = document.querySelector('#main');
+                    if (!main) return false;
+                    const txt = (main.innerText || '').toLowerCase();
+                    const hasKw = txt.includes(anchor.toLowerCase()) || txt.includes('shadow writing') || txt.includes('rule: use');
+                    const hasVidTag = main.querySelector('video, [data-icon*="video"], [data-icon*="media-play"]') !== null;
+                    return hasKw || hasVidTag;
+                }""", VIDEO_ANCHOR_LINE)
+                if has_video_post:
+                    break
+                self.page.mouse.move(850, 450)
+                self.page.mouse.wheel(0, -350)
+                time.sleep(0.7)
+
+        target_box = self.page.evaluate("""({ itemType, quizIdx, videoAnchor }) => {
+            const rawNodes = Array.from(document.querySelectorAll(
+                '#main .message-in, #main .message-out, #main [data-id], #main [role="row"]'
+            ));
+            const posts = [];
+
+            for (const r of rawNodes) {
+                const bubble = (r.classList.contains('message-in') || r.classList.contains('message-out'))
+                    ? r
+                    : (r.querySelector('.message-in, .message-out') || r);
+
+                const rect = bubble.getBoundingClientRect();
+                if (rect.width < 140 || rect.height < 55 || rect.height > 1200) continue;
+
+                const dup = posts.some(p => Math.abs(p.el.getBoundingClientRect().top - rect.top) < 25);
+                if (dup) continue;
+
+                const txt = (bubble.innerText || '').trim();
+                if (!txt && !bubble.querySelector('video, img')) continue;
+
+                const isQuiz = (txt.includes('A)') && txt.includes('B)')) ||
+                               txt.includes('View responses') ||
+                               (bubble.querySelector('[data-icon*="poll"]') !== null);
+
+                const isDailyVideo = !isQuiz && (
+                    txt.toLowerCase().includes(videoAnchor.toLowerCase()) ||
+                    txt.toLowerCase().includes('shadow writing') ||
+                    txt.toLowerCase().includes('rule: use') ||
+                    bubble.querySelector('video, [data-icon*="video"], [data-icon*="play"]') !== null
+                );
+
+                posts.push({
+                    el: bubble,
+                    rowEl: bubble.closest('[role="row"]') || bubble.closest('[data-id]') || bubble.parentElement,
+                    top: rect.top,
+                    isQuiz: isQuiz,
+                    isDailyVideo: isDailyVideo,
+                    text: txt
+                });
+            }
+
+            posts.sort((a, b) => a.top - b.top);
+
+            if (posts.length === 0) {
+                return { error: 'No message bubbles detected inside open chat.' };
+            }
+
+            const last3 = posts.slice(-3);
+            let chosen = null;
+
+            if (itemType === 'video') {
+                const videoMatches = posts.filter(p => p.isDailyVideo && !p.isQuiz);
+                if (videoMatches.length > 0) {
+                    chosen = videoMatches[videoMatches.length - 1];
+                } else {
+                    const nonQuizzes = last3.filter(p => !p.isQuiz);
+                    chosen = nonQuizzes.length > 0 ? nonQuizzes[0] : last3[0];
+                }
+            } else {
+                const quizzes = posts.filter(p => p.isQuiz);
+                if (quizzes.length >= 2) {
+                    chosen = (quizIdx === 0) ? quizzes[quizzes.length - 2] : quizzes[quizzes.length - 1];
+                } else if (quizzes.length === 1) {
+                    chosen = quizzes[0];
+                } else if (last3.length >= 2) {
+                    chosen = (quizIdx === 0) ? last3[last3.length - 2] : last3[last3.length - 1];
+                } else {
+                    chosen = last3[last3.length - 1];
+                }
+            }
+
+            const childSpans = Array.from(chosen.el.querySelectorAll('span, div'));
+            let anchorNode = chosen.el;
+            for (const s of childSpans) {
+                const st = (s.innerText || '').trim().toLowerCase();
+                if (itemType === 'video' && st.includes('do the shadow writing') && s.children.length <= 2) {
+                    anchorNode = s;
+                } else if (itemType !== 'video' && (st.includes('view channel') || st.includes('d)')) && s.children.length <= 2) {
+                    anchorNode = s;
+                }
+            }
+
+            anchorNode.scrollIntoView({ block: 'center', behavior: 'instant' });
+
+            const finalRect = chosen.el.getBoundingClientRect();
+
+            const scope = chosen.rowEl || document.querySelector('#main');
+            const btns = Array.from(scope.querySelectorAll('button, [role="button"], [data-icon]'));
+            let sideForwardBtn = null;
+
+            for (const btn of btns) {
+                const r = btn.getBoundingClientRect();
+                if (r.width === 0 || r.height === 0 || r.top < 100) continue;
+                const icon = (btn.getAttribute('data-icon') || '').toLowerCase();
+                const aria = (btn.getAttribute('aria-label') || btn.getAttribute('title') || '').toLowerCase();
+
+                if (icon.includes('smiley') || icon.includes('react') || aria.includes('react')) continue;
+
+                const isLeftOfBubble = (r.right <= finalRect.left + 15 && r.left >= finalRect.left - 95);
+                const isRightOfBubble = (r.left >= finalRect.right - 15 && r.right <= finalRect.right + 95);
+                const isVerticallyAligned = (r.top >= finalRect.top - 10 && r.bottom <= finalRect.bottom + 10);
+
+                if (icon.includes('forward') || aria.includes('forward') ||
+                    ((isLeftOfBubble || isRightOfBubble) && isVerticallyAligned)) {
+                    sideForwardBtn = {
+                        x: Math.round(r.left + r.width / 2),
+                        y: Math.round(r.top + r.height / 2)
+                    };
+                    if (icon.includes('forward') || aria.includes('forward')) break;
+                }
+            }
+
+            return {
+                left: Math.round(finalRect.left),
+                right: Math.round(finalRect.right),
+                top: Math.round(finalRect.top),
+                bottom: Math.round(finalRect.bottom),
+                sideForwardBtn: sideForwardBtn
+            };
+        }""", {"itemType": item_type, "quizIdx": quiz_index, "videoAnchor": VIDEO_ANCHOR_LINE})
+
+        time.sleep(0.8)
+
+        if "error" in target_box:
+            raise Exception(target_box["error"])
+
+        if target_box.get("sideForwardBtn"):
+            fx = target_box["sideForwardBtn"]["x"]
+            fy = target_box["sideForwardBtn"]["y"]
+            self.page.mouse.move(fx, fy)
+            time.sleep(0.2)
+            self.page.mouse.click(fx, fy)
+            time.sleep(1.2)
+            if self._check_and_advance_to_modal():
+                return
+
+        tr_x = target_box["right"] - 16
+        tr_y = max(target_box["top"] + 16, 130)
+        self.page.mouse.move(target_box["left"] + 100, min(max(target_box["bottom"] - 60, 150), 750))
+        time.sleep(0.4)
+        self.page.mouse.move(tr_x, tr_y)
+        time.sleep(0.5)
+        self.page.mouse.click(tr_x, tr_y)
+        time.sleep(1.0)
+        if self._check_and_advance_to_modal():
+            return
+
+        safe_x = target_box["left"] + 120
+        safe_y = min(max(target_box["bottom"] - 65, 150), 750)
+        self.page.mouse.click(safe_x, safe_y, button="right")
+        time.sleep(1.0)
+        if self._check_and_advance_to_modal():
+            return
+
+        raise Exception("Could not open Forward modal for the selected message.")
+
+    def _select_contact_in_modal(self, contact):
+        queries_to_try = []
+        if contact["raw_number"] and contact["raw_number"].lower() != "nan":
+            queries_to_try.append(contact["raw_number"])
+        if len(contact["digits"]) >= 10:
+            last_10 = contact["digits"][-10:]
+            if last_10 not in queries_to_try:
+                queries_to_try.append(last_10)
+        if contact["name"] and contact["name"].lower() != "nan" and contact["name"] not in queries_to_try:
+            queries_to_try.append(contact["name"])
+
+        for q in queries_to_try:
+            search_input = self._get_forward_modal_and_search()
+            if search_input is None:
+                return "MODAL_CLOSED"
+
+            try:
+                s_box = search_input.bounding_box()
+                if not s_box:
+                    return "MODAL_CLOSED"
+                self.page.mouse.click(s_box["x"] + 30, s_box["y"] + s_box["height"] / 2)
+            except Exception:
+                return "MODAL_CLOSED"
+
+            self.page.keyboard.press("Control+A")
+            self.page.keyboard.press("Backspace")
+            time.sleep(0.3)
+
+            self.page.keyboard.insert_text(q)
+            time.sleep(1.6)
+
+            row_info = self.page.evaluate("""(sRect) => {
+                const dialog = document.querySelector('div[role="dialog"], [data-animate-modal-popup="true"]') || document.body;
+                const dText = (dialog.innerText || '').toLowerCase();
+                if (dText.includes('no results') || dText.includes('no chats') || dText.includes('no contacts')) {
+                    return { found: false, reason: 'No results text visible' };
+                }
+
+                const minRowY = sRect.y + sRect.height + 50;
+                const maxRowY = sRect.y + sRect.height + 155;
+
+                const rowCandidates = [];
+                const allNodes = Array.from(dialog.querySelectorAll('span[dir="auto"], span[title], div[role="checkbox"], input[type="checkbox"], [role="listitem"], [role="button"]'));
+
+                for (const n of allNodes) {
+                    const r = n.getBoundingClientRect();
+                    if (r.width === 0 || r.height === 0 || r.height > 110) continue;
+                    const cy = r.top + r.height / 2;
+                    if (cy >= minRowY && cy <= maxRowY && r.left >= sRect.x - 60 && r.right <= sRect.x + sRect.width + 80) {
+                        const label = (n.innerText || n.getAttribute('title') || '').trim().split('\\n')[0];
+                        const low = label.toLowerCase();
+                        if (!label || low === 'recent chats' || low === 'contacts' || low === 'groups' || low === 'frequently contacted') continue;
+
+                        rowCandidates.push({
+                            y: Math.round(cy),
+                            x: Math.round(r.left + Math.min(r.width / 2, 80)),
+                            label: label
+                        });
+                    }
+                }
+
+                if (rowCandidates.length > 0) {
+                    rowCandidates.sort((a, b) => a.y - b.y);
+                    const topHit = rowCandidates[0];
+                    return {
+                        found: true,
+                        rowY: topHit.y,
+                        rowX: topHit.x,
+                        label: topHit.label
+                    };
+                }
+
+                return { found: false, reason: 'No contact elements in row band' };
+            }""", s_box)
+
+            if not row_info.get("found"):
+                continue
+
+            click_x = int(row_info["rowX"])
+            click_y = int(row_info["rowY"])
+            print(f"       ✅ Selected -> {row_info.get('label')}")
+            self.page.mouse.move(click_x, click_y)
+            time.sleep(0.2)
+            self.page.mouse.click(click_x, click_y)
+            time.sleep(0.8)
+            return "SELECTED"
+
+        search_input = self._get_forward_modal_and_search()
+        if search_input is not None:
+            try:
+                s_box = search_input.bounding_box()
+                if s_box:
+                    self.page.mouse.click(s_box["x"] + 30, s_box["y"] + s_box["height"] / 2)
+                    self.page.keyboard.press("Control+A")
+                    self.page.keyboard.press("Backspace")
+                    time.sleep(0.3)
+            except Exception:
+                pass
+        return "NOT_FOUND"
+
+    def _click_modal_send_button(self):
+        send_btn = self.page.locator(
+            'div[role="dialog"] [data-icon*="send"], '
+            'div[role="dialog"] [aria-label="Send"], '
+            '[data-animate-modal-popup="true"] [data-icon*="send"], '
+            '[data-animate-modal-popup="true"] [aria-label="Send"], '
+            '[data-icon*="send"], [aria-label="Send"]'
+        ).last
+        
+        button_clicked = False
+        if send_btn.is_visible():
+            box = send_btn.bounding_box()
+            if box:
+                self.page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                button_clicked = True
+            else:
+                send_btn.click(force=True)
+                button_clicked = True
+
+        if not button_clicked:
+            clicked_green_btn = self.page.evaluate("""() => {
+                const dialog = document.querySelector('div[role="dialog"], [data-animate-modal-popup="true"]') || document.body;
+                const btns = Array.from(dialog.querySelectorAll('button, [role="button"], span[data-icon]'));
+                for (let i = btns.length - 1; i >= 0; i--) {
+                    const r = btns[i].getBoundingClientRect();
+                    if (r.width >= 28 && r.width <= 75 && r.top > 420 && r.left > 420 && r.left < 780) {
+                        btns[i].click();
+                        return true;
+                    }
+                }
+                return false;
+            }""")
+            if not clicked_green_btn:
+                self.page.keyboard.press("Enter")
+
+        time.sleep(3.5)
+
+    def forward_item_to_batch(self, item_type, quiz_index, batch_contacts):
+        self._close_modal_if_open()
+        self._find_and_click_forward_in_chat(item_type, quiz_index)
+
+        if self._get_forward_modal_and_search() is None:
+            raise Exception("Forward popup did not open.")
+
+        succeeded_contacts = []
+
+        for contact in batch_contacts:
+            print(f"    🔎 Searching: {contact['name']} ({contact['raw_number']})")
+            status = self._select_contact_in_modal(contact)
+            if status == "SELECTED":
+                succeeded_contacts.append(contact)
+            elif status == "MODAL_CLOSED":
+                print("       ⚠️ Forward popup closed early; Re-opening popup for remaining contacts...")
+                self._find_and_click_forward_in_chat(item_type, quiz_index)
+                if self._get_forward_modal_and_search() is not None:
+                    retry_status = self._select_contact_in_modal(contact)
+                    if retry_status == "SELECTED":
+                        succeeded_contacts.append(contact)
+            else:
+                print(f"       ❌ Not Found in WhatsApp: {contact['name']}")
+                logging.warning(f"Contact not found: {contact['name']} ({contact['raw_number']})")
+
+        if succeeded_contacts:
+            if self._get_forward_modal_and_search() is not None:
+                self._click_modal_send_button()
+            return succeeded_contacts
+        else:
+            self._close_modal_if_open()
+            return []
+
+    def close(self):
+        self.browser.close()
+        self.playwright.stop()
+
+
+def run_quiz_automation():
+    print("=" * 70)
+    print(f"🚀 FLUENCE VIDEO & QUIZ FORWARDER (SOURCE: '{SOURCE_CHAT_NAME}')")
+    print("=" * 70)
+
+    excel_path = resolve_excel_path()
+    day_num = get_target_day()
+    contacts = load_and_sort_contacts(excel_path, SHEET_NAME, day_num)
+
+    if not contacts:
+        print(f"\n🎉 All eligible contacts are already completed for Day {day_num}! Nothing to send.")
+        return
+
+    bot = WhatsAppQuizForwarder(PROFILE_DIR)
+
+    try:
+        bot.open_source_chat(SOURCE_CHAT_NAME)
+
+        total_batches = (len(contacts) + BATCH_SIZE - 1) // BATCH_SIZE
+        quiz_turn_counter = 0
+
+        for batch_idx in range(total_batches):
+            start = batch_idx * BATCH_SIZE
+            end = start + BATCH_SIZE
+            batch = contacts[start:end]
+
+            if batch_idx % 2 == 0:
+                item_type = "video"
+                quiz_to_send = 0
+            else:
+                item_type = "quiz"
+                quiz_to_send = quiz_turn_counter % 2
+                quiz_turn_counter += 1
+
+            label = "VIDEO (Shadow Writing)" if item_type == "video" else (f"QUIZ {quiz_to_send + 1}")
+            
+            print("\n" + "═" * 70)
+            print(f"📦 BATCH {batch_idx + 1} OF {total_batches} | Contacts {start + 1} to {min(end, len(contacts))} out of {len(contacts)}")
+            print(f"🎯 ACTION: Forwarding {label}")
+            print(f"📋 TARGETS IN THIS BATCH:")
+            for i, c in enumerate(batch, 1):
+                print(f"   {i}. {c['name']} - {c['raw_number']} ({c['type']})")
+            print("-" * 70)
+            
+            sent_contacts = bot.forward_item_to_batch(item_type, quiz_to_send, batch)
+
+            if sent_contacts:
+                mark_contacts_as_swap(excel_path, SHEET_NAME, day_num, sent_contacts)
+                print(f"\n✅ SUCCESS! Forwarded to {len(sent_contacts)}/{len(batch)} contacts.")
+                for sc in sent_contacts:
+                    print(f"   ✓ {sc['name']}")
+            else:
+                print(f"\n⚠️ Skipped: None of the {len(batch)} contacts in this batch were found in WhatsApp.")
+
+        print("\n" + "=" * 70)
+        print(f"🎉 DONE! All {total_batches} batches for Day {day_num} have been forwarded and marked '{MARK_TEXT}'!")
+        print("=" * 70)
+        logging.info(f"Completed all {total_batches} batches for Day {day_num}.")
+    
+    except Exception as e:
+        logging.exception("Critical error in Quiz Forwarder:")
+        print(f"\n❌ CRITICAL ERROR:\n{e}")
+    finally:
+        bot.close()
+
+
+if __name__ == "__main__":
+    run_quiz_automation()
