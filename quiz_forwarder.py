@@ -40,9 +40,9 @@ WEEKLY_LIMITS = {
     "hot": None,
     "funnel 2": None,
     "warm": 2,          # Max 2 times per week!
-    "fluencer": None,   # <--- Added the missing comma here
+    "fluencer": None,  
     "cool": 1,          # Max 1 time per week!
-    "a_fluencer": None, # <--- Added comma here too (best practice)
+    "a_fluencer": None, 
 }
 # =================================================
 
